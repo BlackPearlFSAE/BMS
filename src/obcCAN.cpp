@@ -16,15 +16,17 @@ void setup() {
   obcsent.data[1] = 0x20; // 800 * 0.1V/s = 80 V Let's Report Back only 80 Volt charging
   obcsent.data[2] = 0x00;
   obcsent.data[3] = 0x32; // 5A fake data
-  obcsent.data[4] = 0b00010; // Send this status bit to be read from LSB order
+  // obcsent.data[4] = 0b00010; // Send this status bit to be read from LSB order
+  obcsent.data[4] = 0b00000; // Send this status bit to be read from LSB order
   obcsent.data[5] = 0x00; obcsent.data[6] = 0x00; obcsent.data[7] = 0x00; // doesn't matter
   Serial.begin(115200);
   
   mcp2515.reset();
-  mcp2515.setBitrate(CAN_250KBPS);
+  // mcp2515.setBitrate(CAN_250KBPS);
+  mcp2515.setBitrate(CAN_500KBPS);
   mcp2515.setNormalMode();
   
-  Serial.println("------- OBC ----------");
+  Serial.println("------- OBC to BMS Master ----------");
   // Serial.println("ID  DLC   DATA");
 }
 
@@ -65,7 +67,7 @@ void loop() {
           obcsent.data[1] = 0x20; // 800 * 0.1V/s = 80 V fake data
           obcsent.data[2] = 0x00;
           obcsent.data[3] = 0x32; // 5A fake data
-          obcsent.data[4] = 0b00010; // Send this status bit to be read from LSB order
+          // obcsent.data[4] = 0b00000; // in real scenario status bit will change according to real error
           break;
         
         case 1:
@@ -75,7 +77,7 @@ void loop() {
           obcsent.data[1] = 0x00; // 800 * 0.1V/s = 80 V fake data
           obcsent.data[2] = 0x00;
           obcsent.data[3] = 0x00; // 5A fake data
-          obcsent.data[4] = 0b00010; // Send this status bit to be read from LSB order
+          // obcsent.data[4] = 0b00010; // Let's Assume Display Overheat STAT
           break;
         }
       }  

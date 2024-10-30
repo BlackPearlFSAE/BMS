@@ -59,7 +59,7 @@ unsigned char* checkstatMSB(unsigned char num){
 // };
 void checkstatLSB(struct status* STAT, unsigned char num){
   // static uint8_t arr[8]; // array to hold 8 binary number
-  STAT->shutdownsig = 1;
+  // STAT->shutdownsig = 1;
   for (int i = 0; i < 8; i++){
     uint8_t bit = num & 1;
     STAT->statbin[i] = bit;

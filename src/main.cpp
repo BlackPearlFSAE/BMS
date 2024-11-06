@@ -1,4 +1,4 @@
-/*! Analog Devices DC2259A Demonstration Board. 
+ /*! Analog Devices DC2259A Demonstration Board. 
 * LTC6811: Multicell Battery Monitors
 *
 *@verbatim
@@ -72,6 +72,7 @@ In this sketch book:
 #include <Arduino.h>
 #include <stdint.h>
 #include <SPI.h>
+#include <mcp_can.h>
 #include "Linduino.h"
 #include "LT_SPI.h"
 #include "LT_I2C.h"          
@@ -115,13 +116,16 @@ void serial_print_hex(uint8_t data);
 char read_hex(void);   
 char get_char(void);
 void run_command(uint32_t cmd);
-
-
 /*******************************************************************
   Setup Variables
   The following variables can be modified to configure the software.
 ********************************************************************/
 const uint8_t TOTAL_IC = 1;//!< Number of ICs in the daisy chain
+const uint8_t CELL_PER_IC = 12;
+
+uint8_t dataF[8];//payload for CAN
+uint8_t dataF2[8];
+uint8_t fault;
 
 //ADC Command Configurations. See LTC681x.h for options.
 const uint8_t ADC_OPT = ADC_OPT_DISABLED; //!< ADC Mode option bit
@@ -176,9 +180,23 @@ bool DCTOBITS[4] = {true, false, true, false}; //!< Discharge time value // Dcto
  \brief  Initializes hardware and variables
  @return void
  ***********************************************************************/
+const int spiCSPin = 10;
+MCP_CAN CAN(spiCSPin);
+float cellVoltage;
+float cell_voltage[TOTAL_IC][CELL_PER_IC];
+
 void setup()
 {
   Serial.begin(9600);
+  // while (CAN_OK != CAN.begin(MCP_ANY, CAN_500KBPS, MCP_16MHZ))
+  // {
+  //     Serial.println("CAN BUS init Failed");
+  //     delay(100);
+  // }
+  // Serial.println("CAN BUS Shield Init OK!");
+  // unsigned char stmp[8] = {ledHIGH, 1, 2, 3, ledLOW, 5, 6, 7};
+
+
   quikeval_SPI_connect();
   spi_enable(SPI_CLOCK_DIV16); // This will set the Linduino to have a 1MHz Clock
   LTC6811_init_cfg(TOTAL_IC, BMS_IC);
@@ -314,7 +332,7 @@ void run_command(uint32_t cmd)
       check_error(error);
       print_sumofcells();
       break;
-      
+    
     case 11: // Loop Measurements of configuration register or cell voltages or auxiliary register or status register without data-log output
       wakeup_sleep(TOTAL_IC);
       LTC6811_wrcfg(TOTAL_IC,BMS_IC);
@@ -661,6 +679,8 @@ void run_command(uint32_t cmd)
 *************************************************************************************************************************************************/
 void measurement_loop(uint8_t datalog_en)
 {
+
+  
   int8_t error = 0;
   char input = 0;
   
@@ -696,7 +716,74 @@ void measurement_loop(uint8_t datalog_en)
       error = LTC6811_rdcv(SEL_ALL_REG, TOTAL_IC,BMS_IC);
       check_error(error);
       print_cells(datalog_en);
+      // uint8_t check = 0;
+    for (int ic = 0; ic < TOTAL_IC; ic++) {
+      Serial.print("IC: ");
+      Serial.println(ic + 1);
+      for (int cell = 0; cell < CELL_PER_IC-2; cell++) {
+        // Calculate cell voltage in volts
+        float cellVoltage = BMS_IC[ic].cells.c_codes[cell] * 0.0001;
+
+        // Determine fault code based on cell voltage
+        uint8_t fault;
+        
+        if (cellVoltage > 4.2) {
+            fault = 2; // Overvoltage
+            Serial.print("Fault: Overvoltage ");
+        } else if (cellVoltage < 3.0) {
+            fault = 4; // Undervoltage
+            Serial.print("Fault: Undervoltage ");
+        } else if ((cellVoltage > 4.1 && cellVoltage < 4.2) ) {
+            fault = 1; 
+            Serial.print("Fault: Warning Overvoltage ");
+        } else if((cellVoltage > 3.0 && cellVoltage < 3.2)){
+            fault = 4;
+            Serial.print("Fault: Warning Undervoltage ");
+        } else {
+            fault = 0; // No fault
+            Serial.print("Fault: None ");
+        }
+
+        // Scale voltage to fit 0-4.2V range into 0-255 range
+        uint8_t voltageScaled = (uint8_t)(cellVoltage * 60);
+
+        // Print cell number, original voltage, and scaled voltage
+        Serial.print("Cell ");
+        Serial.print(cell + 1);
+        Serial.print(" - Voltage: ");
+        Serial.print(cellVoltage, 2);
+        Serial.print("V | Scaled: ");
+        Serial.println(voltageScaled);
+
+        // Store scaled value in appropriate data array and print stored data
+        if (cell + 1 <= 5) {
+            dataF[cell] = voltageScaled;
+            if (cell == 5) { // Insert fault code in the 5th index (cell 4 in zero-based index)
+                dataF[5] = fault;
+            }
+            Serial.print("  Stored in dataF[");
+            Serial.print(cell);
+            Serial.print("]: ");
+            Serial.print("Fault code : ");
+            Serial.print(fault);
+            Serial.println(dataF[cell]);
+        } else if (cell + 1 > 5 && cell + 1 <= 10) {
+            dataF2[cell-5] = voltageScaled;
+            if (cell == 10) { // Insert fault code in the 5th index of dataF2
+                dataF2[5] = fault;
+            }
+            Serial.print("  Stored in dataF2[");
+            Serial.print(cell-5);
+            Serial.print("]: ");
+            Serial.print("Fault code : ");
+            Serial.print(fault);
+            Serial.println(dataF2[cell-5]);
+
+        }
     }
+    Serial.println(); // Newline after each IC's cells for readability
+}
+    }  
   
     if (MEASURE_AUX == ENABLED)
     {
@@ -817,7 +904,8 @@ void print_cells(uint8_t datalog_en)
     {
       Serial.print(" IC ");
       Serial.print(current_ic+1,DEC);
-      Serial.print(": ");      for (int i=0; i< BMS_IC[0].ic_reg.cell_channels; i++)
+      Serial.print(": ");      
+      for(int i=0; i< BMS_IC[0].ic_reg.cell_channels; i++)
       {
         Serial.print(" C");
         Serial.print(i+1,DEC);

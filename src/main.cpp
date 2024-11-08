@@ -180,8 +180,8 @@ bool DCTOBITS[4] = {true, false, true, false}; //!< Discharge time value // Dcto
  \brief  Initializes hardware and variables
  @return void
  ***********************************************************************/
-const int spiCSPin = 10;
-MCP_CAN CAN(spiCSPin);
+// const int spiCSPin = 10;
+// MCP_CAN CAN(spiCSPin);
 float cellVoltage;
 float cell_voltage[TOTAL_IC][CELL_PER_IC];
   

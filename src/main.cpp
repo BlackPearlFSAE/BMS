@@ -184,7 +184,7 @@ const int spiCSPin = 10;
 MCP_CAN CAN(spiCSPin);
 float cellVoltage;
 float cell_voltage[TOTAL_IC][CELL_PER_IC];
-
+  
 void setup()
 {
   Serial.begin(9600);

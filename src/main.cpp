@@ -72,7 +72,7 @@ In this sketch book:
 #include <Arduino.h>
 #include <stdint.h>
 #include <SPI.h>
-#include <mcp_can.h>
+#include <mcp2515.h>
 #include "Linduino.h"
 #include "LT_SPI.h"
 #include "LT_I2C.h"          
@@ -180,11 +180,11 @@ bool DCTOBITS[4] = {true, false, true, false}; //!< Discharge time value // Dcto
  \brief  Initializes hardware and variables
  @return void
  ***********************************************************************/
-const int spiCSPin = 10;
-MCP_CAN CAN(spiCSPin);
+// const int spiCSPin = 10;
+// MCP_CAN CAN(spiCSPin);
 float cellVoltage;
 float cell_voltage[TOTAL_IC][CELL_PER_IC];
-
+  
 void setup()
 {
   Serial.begin(9600);

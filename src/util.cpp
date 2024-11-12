@@ -1,10 +1,8 @@
 #include <iostream>
 #include <stdio.h>
 #include <util.h>
-// struct status {
-//   uint8_t statbin[8];
-//   bool shutdownsig = 1; // Default should be 1 = OK , 0 = SHUTDOWN
-// };
+#include <Arduino.h>
+
 // Split and merge High byte low byte of 16 bit unsigned integer
 unsigned char* splitHLbyte(unsigned int num){
   static uint8_t temp[2]; // initialize
@@ -52,12 +50,7 @@ unsigned char* checkstatMSB(unsigned char num){
   return arr;
 }
 
-// struct status {
-//   uint8_t statbin[8];
-//   bool shutdownsig = 1;
-//   // Default should be 1 = OK , 0 = SHUTDOWN
-// };
-void checkstatLSB(struct status* STAT, unsigned char num){
+void checkstatLSB(SDCstatus* STAT, unsigned char num){
   // static uint8_t arr[8]; // array to hold 8 binary number
   // STAT->shutdownsig = 1;
   for (int i = 0; i < 8; i++){
@@ -77,82 +70,3 @@ void checkstatLSB(struct status* STAT, unsigned char num){
     // Check for bit 1 for immediate shutdown
   } 
 }
-
-status checkstatLSB(struct status STAT, unsigned char num){
-  // static uint8_t arr[8]; // array to hold 8 binary number
-  for (int i = 0; i < 8; i++){
-    STAT.statbin[i] = (num >> i) & 1;
-    // 1st shift will shift to right by 7 position
-        // 1 => 0b00000001 , then AND with 1 so anything that isn't one at 1st pos will be cut off
-        // Ex. 42 = 0b00101010
-        // 00101010 >> 0 = 00101010 & 00000001 = 0 (point at 1st bit 1 encounter from left . shift to right by 0 pos)
-        // 00101010 >> 1 = 00010101 & 00000001 = 1
-        // 00101010 >> 2 = 00001010 & 00000001 = 0
-    // Check for bit 1 for immediate shutdown
-    if(STAT.statbin[i]==1)
-      STAT.shutdownsig = 0;
-  }
-  return STAT; 
-}
-
-// Split and Check bit from LSB -> MSB
-unsigned char *checkstatLSB(unsigned char num){
-  static uint8_t arr[8]; // array to hold 8 binary number
-  for (int i = 0; i < 8; i++){
-    arr[i] = (num >> i) & 1;
-    // 1st shift will shift to right by 7 position
-        // 1 => 0b00000001 , then AND with 1 so anything that isn't one at 1st pos will be cut off
-        // Ex. 42 = 0b00101010
-        // 00101010 >> 0 = 00101010 & 00000001 = 0 (point at 1st bit 1 encounter from left . shift to right by 0 pos)
-        // 00101010 >> 1 = 00010101 & 00000001 = 1
-        // 00101010 >> 2 = 00001010 & 00000001 = 0
-    // Check for bit 1 for immediate shutdown
-  } return arr; 
-}
-
-// Test & Debug
-
-// int main() {
-//   uint8_t num = 8;  // Example decimal number (42)
-//   // unsigned char* x;
-//   // // Read & Store from MSB
-//   // x = checkstatMSB(num);
-//   // for (int i=0; i < 8 ; i++){
-//   //   printf("%d", x[i]);
-//   // }
-//   // putc('\n', stdout);
-  
-//   // Read & Store from LSB
-//   // x = checkstatLSB(num);
-//   // for (int i=0; i < 8 ; i++){
-//   //   printf("%d", x[i]);
-//   // }
-//   // putc('\n', stdout);
-
-//   // Read & Store from lSB in Strcut type
-//   status STAT;
-//   checkstatLSB(&STAT,num);
-//   for (int i=0; i < 8 ; i++){
-//     printf("%d", STAT.statbin[i]);
-//   }
-//   putc('\n', stdout);
-//   printf("%d", STAT.shutdownsig);
-//   putc('\n', stdout);
-
-
-//   // // Split HL byte
-//   // uint16_t a = 1279;
-//   // x = splitHLbyte(a);
-//   // printf("%d", x[0]);
-//   // putc('\n', stdout);
-//   // printf("%d", x[1]);
-//   // putc('\n', stdout);
-
-//   // // Merge HL byte
-//   // uint16_t b = mergeHLbyte(x[0],x[1]);
-//   // // uint16_t b = mergeHLbyte(0b0100,0b11111111);
-//   // printf("%d", b);
-//   // putc('\n', stdout);
-
-//   return 0;
-// }

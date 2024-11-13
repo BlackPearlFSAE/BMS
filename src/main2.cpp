@@ -29,10 +29,10 @@ ESP32SJA1000Class CAN;
 EEPROMClass EEPROM;
 
 /**************** Local Function Delcaration *******************/
-void bmsSendobc(_can_frame* bmssent);
-void bmsReadobc(_can_frame* obcrecieve);
-void CANwrite(bool rtr = 0);
-void CANread();
+void BCUtoOBCwrite(_can_frame* BCUsent);
+void BCUreadOBC(_can_frame* OBCreceived);
+void CANsend(bool rtr = 0);
+void CANreceive();
 
 
 /**************** Setup Variables *******************/
@@ -81,26 +81,32 @@ void loop(){
     digitalWrite(SDCPIN,LOW); Serial.println("!SHUTDOWN!");
   }
 
-  /*---------------------------------------------Charging Event Routine*/
+  //Determine Event BCU is operating on
+  // 1. Charging Event
+
+  // 2. Driving Event
+
+  
+
+  /*---------------------------------------------Charging Event Routine (Cell Balancing)*/
   // Condition to Check if the Charger is plugged 
-  if(chargercond){
 
-    // BCU OBC Communication (500ms cycle time)
-    if(millis()-last_time >= 500) {
-      
-      // Set BCU canframe before sending to OBC according to shutdown state
-      bmsSendobc(&sendmsg);
-      CANwrite(); 
+  // BCU OBC Communication (500ms cycle time)
+  if(millis()-last_time >= 500 && chargercond) {
+    
+    // Write BCU canframe before sending to CAN bus to shutdown state
+    BCUtoOBCwrite(&sendmsg);
+    CANsend(); 
 
-      // Read and interpret OBC canframe before deciding shutdown state
-      CANread();
-      bmsReadobc(&receivemsg);
+    // Receive OBC canframe before Reading and interpreting message before deciding shutdown state
+    CANreceive();
+    BCUreadOBC(&receivemsg);
 
-      last_time = millis();
-    }
+    last_time = millis();
   }
+  
 
-  /*---------------------------------------------Driving Event Routine*/
+  /*---------------------------------------------Driving Event Routine (Monitoting)*/
 
   // BCU CMD <-> BMU Module Report
   if(millis()-last_time >= 100){
@@ -127,13 +133,13 @@ void loop(){
   Local Functions Definition
 ********************************************************************/
 
-void CANwrite(bool rtr = 0){
+void CANsend(bool rtr = 0){
   CAN.beginExtendedPacket(sendmsg.can_id, sendmsg.can_dlc,rtr);
   CAN.write(sendmsg.data,sendmsg.can_dlc);
   CAN.endPacket();
 }
 
-void CANread(){
+void CANreceive(){
   // Read Message (Turn this into function that I must passed _can_frame reference)
     uint16_t packetSize = CAN.parsePacket();
     byte i = 0; 
@@ -160,43 +166,43 @@ void CANread(){
 }
 
 
-void bmsSendobc(_can_frame* bmssent){
+void BCUtoOBCwrite(_can_frame* BCUsent){
   // There needs to be a 1st message to make the OBC not entering COMMUNICATION ERROR
   
       /* Set up BMS CAN frame*/
-    bmssent->can_id  = 0x1806E5F4;
-    bmssent->can_dlc = 8;
+    BCUsent->can_id  = 0x1806E5F4;
+    BCUsent->can_dlc = 8;
 
     // Condition 1 Normal BMS message during charge
     if(SDCstat.shutdownsig == 1) {
-      bmssent->data[0] = 0x02; // V highbyte 
-      bmssent->data[1] = 0xD0; // V lowbyte 72.0 V fake data -> Range 69-72-74 V
-      bmssent->data[2] = 0x00; // A Highbyte
-      bmssent->data[3] = 0x32; // A Lowbyte 5.0 A fake data
-      bmssent->data[4] = 0x00; // Control Byte 0 charger operate
+      BCUsent->data[0] = 0x02; // V highbyte 
+      BCUsent->data[1] = 0xD0; // V lowbyte 72.0 V fake data -> Range 69-72-74 V
+      BCUsent->data[2] = 0x00; // A Highbyte
+      BCUsent->data[3] = 0x32; // A Lowbyte 5.0 A fake data
+      BCUsent->data[4] = 0x00; // Control Byte 0 charger operate
     } else {
       // Condition 0 Shutdown message
-      bmssent->data[0] = 0x00; // V highbyte 
-      bmssent->data[1] = 0x00; // V lowbyte
-      bmssent->data[2] = 0x00; // A Highbyte
-      bmssent->data[3] = 0x00; // A Lowbyte
-      bmssent->data[4] = 0x01; // Control Byte 1 charger shutdown
+      BCUsent->data[0] = 0x00; // V highbyte 
+      BCUsent->data[1] = 0x00; // V lowbyte
+      BCUsent->data[2] = 0x00; // A Highbyte
+      BCUsent->data[3] = 0x00; // A Lowbyte
+      BCUsent->data[4] = 0x01; // Control Byte 1 charger shutdown
     } 
 
     // Initialize all Reserved Byte as 0x00
-    bmssent->data[5] = 0x00;
-    bmssent->data[6] = 0x00;
-    bmssent->data[7] = 0x00;
+    BCUsent->data[5] = 0x00;
+    BCUsent->data[6] = 0x00;
+    BCUsent->data[7] = 0x00;
 }
 
-void bmsReadobc(_can_frame* obcreceived){
+void BCUreadOBC(_can_frame* OBCreceived){
   // This block of code execute if detect CAN message from OBC ONLY--
       if(CAN.packetId() == 0x18FF50E5) {
         // Monitor & Translate current Frame data
-        uint8_t VoutH = obcreceived->data[0];
-        uint8_t VoutL = obcreceived->data[1];
-        uint8_t AoutH = obcreceived->data[2];
-        uint8_t AoutL = obcreceived->data[3];
+        uint8_t VoutH = OBCreceived->data[0];
+        uint8_t VoutL = OBCreceived->data[1];
+        uint8_t AoutH = OBCreceived->data[2];
+        uint8_t AoutL = OBCreceived->data[3];
         float OBCVolt = mergeHLbyte(VoutH,VoutL)*0.1;
         float OBCAmp = mergeHLbyte(AoutH,AoutL)*0.1;
         // OBCVolt = mergeHLbyte(VoutH,VoutL);
@@ -244,9 +250,9 @@ void bmsReadobc(_can_frame* obcreceived){
 }
 
 
-void bcuSendbmu() {
+void BCUtoBMUwrite(_can_frame* BCUsent) {
 
 }
-void bcuReadSDC(){
+void BCUReadSDC(_can_frame* SDCreceived){
 
 }

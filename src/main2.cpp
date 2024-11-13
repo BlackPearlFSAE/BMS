@@ -14,6 +14,7 @@ extern "C" {
   #include <driver/twai.h>
 }
 #include <Arduino.h>
+// #include <ArduinoSTL.h>
 #include <CAN.h>
 #include <EEPROM.h>
 // #include <freertos/
@@ -26,12 +27,12 @@ extern "C" {
 #define OBCPIN 3 // This pin check for Signal from Charging Shutdown Circuit, indicates that it is charged
 
 ESP32SJA1000Class CAN;
-EEPROMClass EEPROM;
+
 
 /**************** Local Function Delcaration *******************/
-void BCUtoOBCwrite(_can_frame* BCUsent);
-void BCUreadOBC(_can_frame* OBCreceived);
-void CANsend(bool rtr = 0);
+void BCUtoOBCWrite(_can_frame* bmssent);
+void BCUreadOBC(_can_frame* obcrecieve);
+void CANsend();
 void CANreceive();
 
 
@@ -56,8 +57,7 @@ void setup() {
   pinMode(OBCPIN,INPUT_PULLDOWN);
   pinMode(SDCPIN,OUTPUT);
   digitalWrite(SDCPIN,HIGH); // BCU shutdown pin , LOW = Shutdown
-  
-  
+
   /* Communication Setup */
   Serial.begin(115200);
   CAN.setPins(DEFAULT_CAN_RX_PIN,DEFAULT_CAN_TX_PIN);
@@ -91,16 +91,16 @@ void loop(){
   /*---------------------------------------------Charging Event Routine (Cell Balancing)*/
   // Condition to Check if the Charger is plugged 
 
-  // BCU OBC Communication (500ms cycle time)
-  if(millis()-last_time >= 500 && chargercond) {
-    
-    // Write BCU canframe before sending to CAN bus to shutdown state
-    BCUtoOBCwrite(&sendmsg);
-    CANsend(); 
+    // BCU OBC Communication (500ms cycle time)
+    if(millis()-last_time >= 500) {
+      
+      // Set BCU canframe before sending to OBC according to shutdown state
+      BCUtoOBCWrite(&sendmsg);
+      CANsend(); 
 
-    // Receive OBC canframe before Reading and interpreting message before deciding shutdown state
-    CANreceive();
-    BCUreadOBC(&receivemsg);
+      // Read and interpret OBC canframe before deciding shutdown state
+      CANreceive();
+      BCUreadOBC(&receivemsg);
 
     last_time = millis();
   }
@@ -133,8 +133,8 @@ void loop(){
   Local Functions Definition
 ********************************************************************/
 
-void CANsend(bool rtr = 0){
-  CAN.beginExtendedPacket(sendmsg.can_id, sendmsg.can_dlc,rtr);
+void CANsend(){
+  CAN.beginExtendedPacket(sendmsg.can_id, sendmsg.can_dlc);
   CAN.write(sendmsg.data,sendmsg.can_dlc);
   CAN.endPacket();
 }
@@ -166,7 +166,7 @@ void CANreceive(){
 }
 
 
-void BCUtoOBCwrite(_can_frame* BCUsent){
+void BCUtoOBCWrite(_can_frame* BCUsent){
   // There needs to be a 1st message to make the OBC not entering COMMUNICATION ERROR
   
       /* Set up BMS CAN frame*/
@@ -195,14 +195,14 @@ void BCUtoOBCwrite(_can_frame* BCUsent){
     BCUsent->data[7] = 0x00;
 }
 
-void BCUreadOBC(_can_frame* OBCreceived){
+void BCUreadOBC(_can_frame* BCUreceived){
   // This block of code execute if detect CAN message from OBC ONLY--
       if(CAN.packetId() == 0x18FF50E5) {
         // Monitor & Translate current Frame data
-        uint8_t VoutH = OBCreceived->data[0];
-        uint8_t VoutL = OBCreceived->data[1];
-        uint8_t AoutH = OBCreceived->data[2];
-        uint8_t AoutL = OBCreceived->data[3];
+        uint8_t VoutH = BCUreceived->data[0];
+        uint8_t VoutL = BCUreceived->data[1];
+        uint8_t AoutH = BCUreceived->data[2];
+        uint8_t AoutL = BCUreceived->data[3];
         float OBCVolt = mergeHLbyte(VoutH,VoutL)*0.1;
         float OBCAmp = mergeHLbyte(AoutH,AoutL)*0.1;
         // OBCVolt = mergeHLbyte(VoutH,VoutL);
@@ -211,7 +211,7 @@ void BCUreadOBC(_can_frame* OBCreceived){
         Serial.print("Current from OBC: "); Serial.print(OBCAmp); Serial.println("A");
         
         /* Interpret OBC status, and decide on Shutdown command */
-          uint8_t stat =  receivemsg.data[4]; // Status Byte
+          uint8_t stat =  BCUreceived->data[4]; // Status Byte
           checkstatLSB(&SDCstat,stat);
 
         // Intepret Individual bit meaning

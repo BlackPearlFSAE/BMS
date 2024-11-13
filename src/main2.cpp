@@ -14,6 +14,7 @@ extern "C" {
   #include <driver/twai.h>
 }
 #include <Arduino.h>
+// #include <ArduinoSTL.h>
 #include <CAN.h>
 #include <EEPROM.h>
 // #include <freertos/
@@ -26,13 +27,13 @@ extern "C" {
 #define OBCPIN 3 // This pin check for Signal from Charging Shutdown Circuit, indicates that it is charged
 
 ESP32SJA1000Class CAN;
-EEPROMClass EEPROM;
+
 
 /**************** Local Function Delcaration *******************/
-void bmsSendobc(_can_frame* bmssent);
-void bmsReadobc(_can_frame* obcrecieve);
-void CANwrite(bool rtr = 0);
-void CANread();
+void BCUtoOBCWrite(_can_frame* bmssent);
+void BCUreadOBC(_can_frame* obcrecieve);
+void CANsend();
+void CANreceive();
 
 
 /**************** Setup Variables *******************/
@@ -56,8 +57,7 @@ void setup() {
   pinMode(OBCPIN,INPUT_PULLDOWN);
   pinMode(SDCPIN,OUTPUT);
   digitalWrite(SDCPIN,HIGH); // BCU shutdown pin , LOW = Shutdown
-  
-  
+
   /* Communication Setup */
   Serial.begin(115200);
   CAN.setPins(DEFAULT_CAN_RX_PIN,DEFAULT_CAN_TX_PIN);
@@ -89,12 +89,12 @@ void loop(){
     if(millis()-last_time >= 500) {
       
       // Set BCU canframe before sending to OBC according to shutdown state
-      bmsSendobc(&sendmsg);
-      CANwrite(); 
+      BCUtoOBCWrite(&sendmsg);
+      CANsend(); 
 
       // Read and interpret OBC canframe before deciding shutdown state
-      CANread();
-      bmsReadobc(&receivemsg);
+      CANreceive();
+      BCUreadOBC(&receivemsg);
 
       last_time = millis();
     }
@@ -127,13 +127,13 @@ void loop(){
   Local Functions Definition
 ********************************************************************/
 
-void CANwrite(bool rtr = 0){
-  CAN.beginExtendedPacket(sendmsg.can_id, sendmsg.can_dlc,rtr);
+void CANsend(){
+  CAN.beginExtendedPacket(sendmsg.can_id, sendmsg.can_dlc);
   CAN.write(sendmsg.data,sendmsg.can_dlc);
   CAN.endPacket();
 }
 
-void CANread(){
+void CANreceive(){
   // Read Message (Turn this into function that I must passed _can_frame reference)
     uint16_t packetSize = CAN.parsePacket();
     byte i = 0; 
@@ -160,43 +160,43 @@ void CANread(){
 }
 
 
-void bmsSendobc(_can_frame* bmssent){
+void BCUtoOBCWrite(_can_frame* BCUsent){
   // There needs to be a 1st message to make the OBC not entering COMMUNICATION ERROR
   
       /* Set up BMS CAN frame*/
-    bmssent->can_id  = 0x1806E5F4;
-    bmssent->can_dlc = 8;
+    BCUsent->can_id  = 0x1806E5F4;
+    BCUsent->can_dlc = 8;
 
     // Condition 1 Normal BMS message during charge
     if(SDCstat.shutdownsig == 1) {
-      bmssent->data[0] = 0x02; // V highbyte 
-      bmssent->data[1] = 0xD0; // V lowbyte 72.0 V fake data -> Range 69-72-74 V
-      bmssent->data[2] = 0x00; // A Highbyte
-      bmssent->data[3] = 0x32; // A Lowbyte 5.0 A fake data
-      bmssent->data[4] = 0x00; // Control Byte 0 charger operate
+      BCUsent->data[0] = 0x02; // V highbyte 
+      BCUsent->data[1] = 0xD0; // V lowbyte 72.0 V fake data -> Range 69-72-74 V
+      BCUsent->data[2] = 0x00; // A Highbyte
+      BCUsent->data[3] = 0x32; // A Lowbyte 5.0 A fake data
+      BCUsent->data[4] = 0x00; // Control Byte 0 charger operate
     } else {
       // Condition 0 Shutdown message
-      bmssent->data[0] = 0x00; // V highbyte 
-      bmssent->data[1] = 0x00; // V lowbyte
-      bmssent->data[2] = 0x00; // A Highbyte
-      bmssent->data[3] = 0x00; // A Lowbyte
-      bmssent->data[4] = 0x01; // Control Byte 1 charger shutdown
+      BCUsent->data[0] = 0x00; // V highbyte 
+      BCUsent->data[1] = 0x00; // V lowbyte
+      BCUsent->data[2] = 0x00; // A Highbyte
+      BCUsent->data[3] = 0x00; // A Lowbyte
+      BCUsent->data[4] = 0x01; // Control Byte 1 charger shutdown
     } 
 
     // Initialize all Reserved Byte as 0x00
-    bmssent->data[5] = 0x00;
-    bmssent->data[6] = 0x00;
-    bmssent->data[7] = 0x00;
+    BCUsent->data[5] = 0x00;
+    BCUsent->data[6] = 0x00;
+    BCUsent->data[7] = 0x00;
 }
 
-void bmsReadobc(_can_frame* obcreceived){
+void BCUreadOBC(_can_frame* BCUreceived){
   // This block of code execute if detect CAN message from OBC ONLY--
       if(CAN.packetId() == 0x18FF50E5) {
         // Monitor & Translate current Frame data
-        uint8_t VoutH = obcreceived->data[0];
-        uint8_t VoutL = obcreceived->data[1];
-        uint8_t AoutH = obcreceived->data[2];
-        uint8_t AoutL = obcreceived->data[3];
+        uint8_t VoutH = BCUreceived->data[0];
+        uint8_t VoutL = BCUreceived->data[1];
+        uint8_t AoutH = BCUreceived->data[2];
+        uint8_t AoutL = BCUreceived->data[3];
         float OBCVolt = mergeHLbyte(VoutH,VoutL)*0.1;
         float OBCAmp = mergeHLbyte(AoutH,AoutL)*0.1;
         // OBCVolt = mergeHLbyte(VoutH,VoutL);
@@ -205,7 +205,7 @@ void bmsReadobc(_can_frame* obcreceived){
         Serial.print("Current from OBC: "); Serial.print(OBCAmp); Serial.println("A");
         
         /* Interpret OBC status, and decide on Shutdown command */
-          uint8_t stat =  receivemsg.data[4]; // Status Byte
+          uint8_t stat =  BCUreceived->data[4]; // Status Byte
           checkstatLSB(&SDCstat,stat);
 
         // Intepret Individual bit meaning

@@ -4,6 +4,7 @@
 #include <Arduino.h>
 // #include <ArduinoSTL.h>
 
+/*------------------------------ General Functions ----*/
 // Split and merge High byte low byte of 16 bit unsigned integer
 unsigned char* splitHLbyte(unsigned int num){
   static uint8_t temp[2]; // initialize
@@ -34,6 +35,8 @@ float Decode_bytearray(unsigned char* c) {
     memcpy(&f, c, sizeof(f));
     return f;
 }
+
+/*------------------------------ Shutdown Circuit Functions ----*/
 
 // Split and Check bit from MSB -> LSB
 unsigned char* checkstatMSB(unsigned char num){
@@ -71,3 +74,32 @@ void checkstatLSB(SDCstatus* STAT, unsigned char num){
     // Check for bit 1 for immediate shutdown
   } 
 }
+
+/*------------------------------ CAN comminication Functions ----*/
+// 1 CE 1 0A 00
+// 0001 1100 1110 0001 0000 1010 0000 0000
+// Function to create a CAN ID for BMU messages
+
+uint32_t createExtendedCANID(uint8_t PRIORITY, uint8_t BASE_ID, uint8_t MSG_NUM ,uint8_t SRC_ADDRESS, uint8_t DEST_ADDRESS) {
+    uint32_t canID = 0;
+    canID |= ((PRIORITY & 0x1F) << 28);        // (X)Priority (bits 29)
+    canID |= ((BASE_ID & 0xFF) << 20);         // (BB) Base id denotes CAN channel (bit 28-20)
+    canID |= ((MSG_NUM & 0xFF) << 16);         // (X) Message number (bits 19-16)
+    canID |= ((SRC_ADDRESS & 0xFF) << 8);      // (SS)Source BMU address (bits 15-8)
+    canID |= DEST_ADDRESS;                     // (DD)Destination BCU address (bits 7-0)
+    return canID;
+}
+
+// Function to decode the extended CAN ID
+void decodeExtendedCANID(struct CANIDDecoded* myCAN ,uint32_t canID) {
+    
+    myCAN->PRIORITY = (canID >> 28) & 0x1F;        // Extract priority (bits 29)
+    myCAN->BASE_ID = (canID >> 20) & 0xFF;         // Extract Message Number (bits 28-20)
+    myCAN->MSG_NUM = (canID >> 16) & 0x0F;         // Extract Message Number (bits 19-16)
+    myCAN->SRC = (canID >> 8) & 0xFF;              // Extract Source Address (bits 15-8)
+    myCAN->DEST = canID & 0xFF;                    // Extract destination address (bits 7-0)
+    
+}
+
+
+// BMS data structure

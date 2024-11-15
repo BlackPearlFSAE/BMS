@@ -12,7 +12,7 @@ float Decode_bytearray(unsigned char* c);
 
 
 
-// --Charging Shutdown & BMS Util
+// --Shutdown & BMS Util
 
 struct SDCstatus { // Need to change to more specific name
   uint8_t statbin[8];
@@ -21,7 +21,16 @@ struct SDCstatus { // Need to change to more specific name
 void checkstatLSB(SDCstatus* STAT, unsigned char num);
 
 // --BMS Specific Util
+struct CANIDDecoded {
+    uint8_t PRIORITY;
+    uint8_t BASE_ID;
+    uint8_t MSG_NUM;
+    uint8_t SRC;
+    uint8_t DEST;
+};
 
+void decodeExtendedCANID(struct CANIDDecoded* CANIDDecoded ,uint32_t canID);
+uint32_t createExtendedCANID(uint8_t BASE_ID,uint8_t PRIORITY, uint8_t MSG_NUM ,uint8_t SRC_ADDRESS, uint8_t DEST_ADDRESS);
 
 // --ESP32 Monitor board Util
 #define STANDARD_DLC 8

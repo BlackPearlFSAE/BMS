@@ -23,10 +23,12 @@ extern "C" {
 #include <util.h>
 
 /************************* Define macros *****************************/
-#define SDCPIN 2 // actual test will use pin ...
-#define OBCPIN 3 // This pin check for Signal from Charging Shutdown Circuit, indicates that it is charged
-
-ESP32SJA1000Class CAN;
+#define SDCIN 2   // Check OK signal from Shutdown Circuit => Its status must match all below Signal pin , otherwise faulty SDC
+#define OBCIN 3   // Check OK Signal from Charging Shutdown Circuit, indicates that it is charged
+#define BSPDIN 4  // Check BSPD OK signal from BSPD directly 
+#define IMDIN 5   // Check IMD OK signal from IMD directly
+#define BMSOUT 6  // OUTPUT Fault Signal to BMS relay
+// ESP32SJA1000Class CAN;
 
 
 /**************** Local Function Delcaration *******************/
@@ -34,7 +36,7 @@ void BCUtoOBCWrite(_can_frame* BCUsent);
 void BCUreadOBC(_can_frame* BCUrecevid);
 void BCUtoBMUwrite(_can_frame* BCUsent);
 void BCUreadBMU(_can_frame* BCUreceived);
-void BCUReadSDC(_can_frame* BCUrecevid);
+void BCUReadSDC();
 void CANsend();
 void CANreceive();
 
@@ -43,15 +45,23 @@ void CANreceive();
 
 const int initFlagAddress = 0;  // Address to store initialization flag
 const byte initFlagValue = 0xAA; // Arbitrary non-zero value indicating initialized
+// Global Struct
 _can_frame sendmsg;
 _can_frame receivemsg;
 SDCstatus SDCstat;
+bool BCUSHUTDOWN_STATE = 1;
 unsigned long last_time = 0;
 unsigned long last_time2 = 0;
 unsigned long beforeTimeout = 0;
 bool TIMEOUT_FLAG = false; // Which condition will reset this flag? , Repress the emergency Button
-int CHARGING_FLAG = false; // (May use External Interrupt later)
-bool eepromWriteFlag = false; // Change this value to true if you want to change Default Parameter
+bool CHARGING_FLAG = false; // (May use External Interrupt to change this flag later)
+bool eepromWriteFlag = false; // Change this value to true if you want to update Default Parameter
+
+uint8_t *tempptr = nullptr; // General Purpose pointer , use for any temporary placeholder
+
+
+//Class or Struct for Data logging ------------------------*****************------------------*//
+/*--------------------------------------------------------------------------------------------*/
 
 /*******************************************************************
   Setup Program
@@ -61,10 +71,14 @@ bool eepromWriteFlag = false; // Change this value to true if you want to change
 void setup() {
   
   /* Shutdown System setup */
-  pinMode(OBCPIN,INPUT_PULLDOWN);
-  pinMode(SDCPIN,OUTPUT);
-  digitalWrite(SDCPIN,HIGH); // BCU shutdown pin , LOW = Shutdown
-
+  pinMode(SDCIN,INPUT_PULLDOWN); 
+  pinMode(OBCIN,INPUT_PULLDOWN);
+  pinMode(BMSOUT,OUTPUT);
+  // In case of specific troubleshooting
+  pinMode(IMDIN,INPUT_PULLDOWN);
+  pinMode(BSPDIN,INPUT_PULLDOWN);
+  
+  
   /* Write Default Parameter to EEPROM only once*/
   if (eepromWriteFlag) {
     Serial.println("EEPROM is being initialized.");
@@ -105,19 +119,30 @@ void setup() {
 
 void loop(){
   
+  // ! this  Condtion may reset shutdown status unknowingly
+
+  // This section reads SDC , CHG_SDC , IMD, BSPD signal , proper logic shifting is needed
+
+  (digitalRead(SDCIN) || digitalRead(OBCIN)) ? (SDCstat.SHUTDOWN_OK = 1) : (SDCstat.SHUTDOWN_OK = 0);
+  (digitalRead(IMDIN)) ? (SDCstat.IMD_OK = 1) : (SDCstat.IMD_OK = 0);
+  (digitalRead(BSPDIN)) ? (SDCstat.IMD_OK = 1) : (SDCstat.BSPD_OK = 0);
+  
+  
+  // Any form of CAN communication timeout will Shutdown
   if(TIMEOUT_FLAG){
-    SDCstat.shutdownsig = 0;
+    SDCstat.SHUTDOWN_OK = 0;
     Serial.println("BCU Detect COMMUNICATION Timeout");
   }
-  BCUReadSDC(&receivemsg);
-  if(SDCstat.shutdownsig == 1){
-    digitalWrite(SDCPIN,HIGH);
+  
+  // Set BCUSHUTDOWN_STATE to 0, if fault detects. or SDCIN , OBCIN read 0
+  if(SDCstat.SHUTDOWN_OK == 1){
+    digitalWrite(BMSOUT,HIGH);
   } else {
-    digitalWrite(SDCPIN,LOW); Serial.println("!SHUTDOWN!");
+    digitalWrite(BMSOUT,LOW); Serial.println("!SHUTDOWN!");
   }
 
-  // Condition to Check if the Charger is plugged 
-  (OBCPIN) ? (CHARGING_FLAG = true) : (CHARGING_FLAG = false);
+  // Reconfirm if the Charger is actually plugged 
+  (digitalRead(OBCIN)) ? (CHARGING_FLAG = true) : (CHARGING_FLAG = false);
 
   /*---------------------------------------------Charging Event Routine*/
   
@@ -197,7 +222,7 @@ void BCUtoOBCWrite(_can_frame* BCUsent){
     BCUsent->can_dlc = 8;
 
     // Condition 1 Normal BMS message during charge
-    if(SDCstat.shutdownsig == 1) {
+    if(SDCstat.SHUTDOWN_OK == 1) {
       BCUsent->data[0] = 0x02; // V highbyte 
       BCUsent->data[1] = 0xD0; // V lowbyte 72.0 V fake data -> Range 69-72-74 V
       BCUsent->data[2] = 0x00; // A Highbyte
@@ -233,36 +258,36 @@ void BCUreadOBC(_can_frame* BCUreceived){
       
       /* Interpret OBC status, and decide on Shutdown command */
         uint8_t stat =  BCUreceived->data[4]; // Status Byte
-        checkstatLSB(&SDCstat,stat);
+        uint8_t *statusbit_array = checkstatLSB(stat);
+        // checkstatLSB(&SDCstat,stat);
 
       // Intepret Individual bit meaning
       Serial.print("OBC status: "); 
       for (short i =0 ; i <8 ; i++)
-        Serial.print(SDCstat.statbin[i],DEC);
+        Serial.print(statusbit_array[i],HEX);
       Serial.println();
 
-
-      switch (SDCstat.statbin[0]) {
+      switch (statusbit_array[0]) {
         case 1:
           Serial.println("ChargerHW = Faulty");
           break;
       }
-      switch (SDCstat.statbin[1]) {
+      switch (statusbit_array[1]) {
         case 1:
           Serial.println("ChargerTemp = Overheat");
           break;
       }
-      switch (SDCstat.statbin[2]) {
+      switch (statusbit_array[2]) {
         case 1:
           Serial.println("ChargerACplug = Reversed");
           break;
       }
-      switch (SDCstat.statbin[3]) {
+      switch (statusbit_array[3]) {
         case 1:
           Serial.println("Charger detects: ZERO Vbatt");
           break;
       }
-      switch (SDCstat.statbin[4]) {
+      switch (statusbit_array[4]) {
         case 1:
           Serial.println("OBC Detect COMMUNICATION Time out: (6s)");
           break;
@@ -272,11 +297,11 @@ void BCUreadOBC(_can_frame* BCUreceived){
 
 
 void BCUtoBMUwrite(_can_frame* BCUsent){
-    byte Timeout = EEPROM.read(1);
-    byte VmaxCell = EEPROM.read(2);
-    byte VminCell = EEPROM.read(3);
-    byte Tmax = EEPROM.read(4);
-    byte dVmax = EEPROM.read(5);
+    byte Timeout = EEPROM.read(0);
+    byte VmaxCell = EEPROM.read(1);
+    byte VminCell = EEPROM.read(2);
+    byte Tmax = EEPROM.read(3);
+    byte dVmax = EEPROM.read(4);
 
     /* Set up BMS CAN frame*/
     BCUsent->can_id  = 0x0CE00000;
@@ -284,53 +309,106 @@ void BCUtoBMUwrite(_can_frame* BCUsent){
 
     // Condition 1 Charging Event
     // Condition 2 Driving Event
-    if(SDCstat.shutdownsig == 1) {
+    if(SDCstat.SHUTDOWN_OK == 1) {
       BCUsent->data[0] = 0b0000; 
     } else {
       BCUsent->data[0] = 0x00; // V highbyte 
     } 
-    BCUsent->data[2] = (byte)Timeout/1; // Turn this into variable
-    BCUsent->data[3] = (byte)VmaxCell/0.1; // Turn this into var
-    BCUsent->data[4] = (byte)VminCell/0.1; // turn this into var
+    BCUsent->data[2] = (byte)Timeout/1;
+    BCUsent->data[3] = (byte)VmaxCell/0.1; 
+    BCUsent->data[4] = (byte)VminCell/0.1; 
     BCUsent->data[5] = (byte)Tmax/1; 
     BCUsent->data[6] = (byte)dVmax/0.1;
-    // resereved byte
+    // Resereved byte
     BCUsent->data[7] = 0x00;
 
 }
 
 
 void BCUreadBMU(_can_frame* BCUreceived){
-  // Function to concatenate and split string
+  // Function to concatenate and split string??
+
 
   CANIDDecoded decodedCANID;
   decodeExtendedCANID(&decodedCANID, (BCUreceived->can_id));
 
-  float Vcell[10];
-  float Temp[3];
-  float dv;
-  float balanceNum = 0b00000000000;
+  float V_cell[10];
+  float Temp_cell[3];
+  int currentsense;
+  float dv = 0.0;
 
-
+  u_int8_t optstatusbit = 0b00000000;
+  u_int16_t balanceNum = 0b00000000000;
+  u_int16_t faultcellnum = 0b00000000000;
+  
   // Layout all relevant data for ROS topics
+  
   if(decodedCANID.PRIORITY == 0x01 && decodedCANID.BASE_ID == 0xCE && decodedCANID.DEST == 0xE5){
     switch (decodedCANID.MSG_NUM) {
+    
+    // Case msgnum = 1 , // Opt status , faultcode, faultcode cell number
+    // There's still a problem if each of the cell somehow exhibit more than 1 fault? , would that mean the same message must be tx?
     case 1:
+      bool &bcushutdown_state = BCUSHUTDOWN_STATE; // Alias name
+
+      Serial.print("BMU Operation Status (LSB)"); Serial.print(":");
+      optstatusbit = BCUreceived->data[0];
+      uint8_t *OPT_BITARRAY = checkstatLSB(BCUreceived->data[0]);
+      for (short i=0; i < 8; i++){
+        Serial.print(OPT_BITARRAY[i]);
+        if(OPT_BITARRAY[i] == 1)
+          bcushutdown_state = false;
+      } Serial.println();
+      // Interpret BitArray
+        // Save Data to Data Log data
+        // Datalog = OPT_BITARRAY
+
+      // Change this one to instead of passing specific struct, just return bool , and use external if-else to set the struct stat
+      // also return stat array (dynamic array) , then we can shove that statarray to any struct array later 
+      // SDC status will now be enumerator? with 3 levels of 
+      Serial.println();
+      break;
+
+    // Case msgnum = 2 , 8 cell voltages
+    case 2:
       
       Serial.print("Module No.");Serial.println(decodedCANID.SRC);
-      for(short i; i<10;i++){
+      for(short i; i<8; i++){
         Serial.print("VCell"); Serial.print(i+1); Serial.print(":");
-        Vcell[i] = BCUreceived->data[i]*0.02;
-        Serial.println(Vcell[i]); Serial.print("V");
+        V_cell[i] = BCUreceived->data[i]*0.02;
+        Serial.println(V_cell[i]); Serial.print("V");
       }
       break;
     
-    case 2:
+    // Case msgnum =  3, 2 cell voltages , 3 cell temperature, 1 (Current sense), and cell balancing discharge bit
+    case 3:
       Serial.print("Module No.");Serial.println(decodedCANID.SRC);
-      for(short i; i<10;i++){
-        Serial.print("VCell"); Serial.print(i+1); Serial.print(":");
-        Vcell[i] = BCUreceived->data[i]*0.02;
-        Serial.println(Vcell[i]); Serial.print("V");
+      for(short i; i<8; i++){
+        if( i<2 ) {
+          Serial.print("VCell"); Serial.print(9+i); Serial.print(":");
+          V_cell[i] = BCUreceived->data[i]*0.02;
+          Serial.print(V_cell[i]); Serial.println("V");
+        } else if( i<5 ) {
+
+          Serial.print("Temp"); Serial.print(i+1); Serial.print(":");
+          Temp_cell[i-2] = BCUreceived->data[i]*0.0125;
+          Serial.print(Temp_cell[i-2]); Serial.println("C");
+          
+        } else if ( i == 5 ) {
+
+          Serial.print("Discharged Current"); Serial.print(":");
+          currentsense = BCUreceived->data[i];
+          Serial.print(currentsense); Serial.println("A");
+
+        } else {
+          Serial.print("Cell balancing discharge"); Serial.print(":");
+          balanceNum = BCUreceived->data[i];
+          // Need function to check binary position in LSB or MSB,
+          // checkstatLSB(); 
+          // Change this one to instead of passing specific struct, just return bool , and use external if-else to set the struct stat
+          // also return stat array (dynamic array) , then we can shove that statarray to any struct array later 
+          Serial.println(balanceNum); 
+        }
       }
       break;
     }
@@ -340,6 +418,4 @@ void BCUreadBMU(_can_frame* BCUreceived){
 
 }
 
-void BCUReadSDC(_can_frame* BCUreceived){
-
-}
+// Yuil sketch function to publish ROS topics

@@ -4,6 +4,15 @@
 #include <Arduino.h>
 // #include <ArduinoSTL.h>
 
+
+enum SDCSTATUS{
+  OK = 2,
+  WARNING = 1,
+  NOT_OK = 0
+
+};
+
+
 /*------------------------------ General Functions ----*/
 // Split and merge High byte low byte of 16 bit unsigned integer
 unsigned char* splitHLbyte(unsigned int num){
@@ -60,8 +69,10 @@ void checkstatLSB(SDCstatus* STAT, unsigned char num){
   for (int i = 0; i < 8; i++){
     uint8_t bit = num & 1;
     STAT->statbin[i] = bit;
+
+    // This is for immediate shutdown , might change
     if(bit == 1){
-        STAT->shutdownsig = 0;
+        STAT->SHUTDOWN_OK = 0;
     }
     num >>= 1; // Right Shift num by 1 pos. before next loop , we AND with 1 again
 
@@ -75,11 +86,51 @@ void checkstatLSB(SDCstatus* STAT, unsigned char num){
   } 
 }
 
-/*------------------------------ CAN comminication Functions ----*/
+uint8_t *checkstatMSB(unsigned char num){
+  static uint8_t bitarr[8]; // array to hold 8 binary number
+  for (int i = 7; i >= 0; i++){
+    uint8_t bit = num & 1;
+    bitarr[7-i] = bit;
+    num >>= 1; // Right Shift num by 1 pos. before next loop , we AND with 1 again
+
+    // 1st shift will shift to right by 7 position
+        // 1 => 0b00000001 , then AND with 1 so anything that isn't one at 1st pos will be cut off
+        // Ex. 42 = 0b00101010
+        // 00101010 >> 0 = 00101010 & 00000001 = 0 (point at 1st bit 1 encounter from left . shift to right by 0 pos)
+        // 00101010 >> 1 = 00010101 & 00000001 = 1
+        // 00101010 >> 2 = 00001010 & 00000001 = 0
+    // Check for bit 1 for immediate shutdown
+    return bitarr; 
+  } 
+}
+
+// Turn binary digit to binary array , and set a boolean value if bit "1" is found inside the binary digit
+// Check from LSB
+uint8_t *checkstatLSB(unsigned char num){
+  static uint8_t bitarr[8]; // array to hold 8 binary number
+  for (int i = 0; i < 8; i++){
+    uint8_t bit = num & 1;
+    bitarr[i] = bit;
+    num >>= 1; // Right Shift num by 1 pos. before next loop , we AND with 1 again
+
+    // 1st shift will shift to right by 7 position
+        // 1 => 0b00000001 , then AND with 1 so anything that isn't one at 1st pos will be cut off
+        // Ex. 42 = 0b00101010
+        // 00101010 >> 0 = 00101010 & 00000001 = 0 (point at 1st bit 1 encounter from left . shift to right by 0 pos)
+        // 00101010 >> 1 = 00010101 & 00000001 = 1
+        // 00101010 >> 2 = 00001010 & 00000001 = 0
+    // Check for bit 1 for immediate shutdown
+    return bitarr; 
+  } 
+}
+
+/*------------------------------ CAN comminication Functions ----
+-----(Check the spreadsheet in README.md for CAN ID custom rules)*/
+
 // 1 CE 1 0A 00
 // 0001 1100 1110 0001 0000 1010 0000 0000
-// Function to create a CAN ID for BMU messages
 
+// Function to create a CAN ID for BMU messages 
 uint32_t createExtendedCANID(uint8_t PRIORITY, uint8_t BASE_ID, uint8_t MSG_NUM ,uint8_t SRC_ADDRESS, uint8_t DEST_ADDRESS) {
     uint32_t canID = 0;
     canID |= ((PRIORITY & 0x1F) << 28);        // (X)Priority (bits 29)

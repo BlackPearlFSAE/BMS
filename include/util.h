@@ -16,9 +16,12 @@ float Decode_bytearray(unsigned char* c);
 
 struct SDCstatus { // Need to change to more specific name
   uint8_t statbin[8];
-  bool shutdownsig = 1; // Default should be 1 = OK , 0 = SHUTDOWN
+  bool SHUTDOWN_OK = 1; // Default should be 1 = OK , 0 = SHUTDOWN
+  bool IMD_OK = 1;
+  bool BSPD_OK = 1;
 };
 void checkstatLSB(SDCstatus* STAT, unsigned char num);
+uint8_t *checkstatLSB(unsigned char num);
 
 // --BMS Specific Util
 struct CANIDDecoded {

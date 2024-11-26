@@ -46,8 +46,7 @@ float Decode_bytearray(unsigned char* c) {
     return f;
 }
 
-// /*------------------------------ Shutdown Circuit Functions ----*/
-
+// Convert Binary to Binary digit array
 // Split and Check bit from MSB -> LSB
 // 1st shift will shift to right by 7 position
         // 1 => 0b00000001 , then AND with 1 so anything that isn't one at 1st pos will be cut off
@@ -57,10 +56,9 @@ float Decode_bytearray(unsigned char* c) {
         // 00101010 >> 2 = 00001010 & 00000001 = 0
     // Check for bit 1 for immediate shutdown
 
-// Convert Binary to Binary digit array
-// Check from LSB
 
-uint16_t *checkstatMSB(unsigned char num){
+// Split check and convert to bitarray with respect to MSB
+uint16_t *toBitarrayMSB(unsigned char num){
   static uint16_t bitarr[8]; // array to hold 8 binary number
   for (int i = 7; i >= 0; i--){
     uint8_t bit = num & 1;
@@ -70,9 +68,8 @@ uint16_t *checkstatMSB(unsigned char num){
   return bitarr; 
 }
 
-// Convert Binary to Binary digit array
-// Check from LSB
-uint16_t *checkstatLSB(unsigned char num){
+// Split check and convert to bitarray with respect to LSB
+uint16_t *toBitarrayLSB(unsigned char num){
   static uint16_t bitarr[8]; // array to hold 8 binary number
   for (int i = 0; i < 8; i++){
     uint8_t bit = num & 1;
@@ -82,7 +79,7 @@ uint16_t *checkstatLSB(unsigned char num){
   return bitarr; 
 }
 
-
+// /*------------------------------ Shutdown Circuit Functions ----*/
 // void checkstatMSB(SDCstatus* STAT, unsigned char num){
 //   // static uint8_t arr[8]; // array to hold 8 binary number
 //   // STAT->shutdownsig = 1;

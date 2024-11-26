@@ -10,17 +10,15 @@ RTOS and Push ROS topics
 */
 
 /************************* Includes ***************************/
-extern "C" {
-  #include <driver/twai.h>
-}
+// extern "C" {
+//   #include <driver/twai.h>
+// }
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include <Arduino.h>
-// #include <ArduinoSTL.h>
 #include <CAN.h>
 #include <EEPROM.h>
 // #include <freertos/
-
 // utility function
 #include <util.h>
 
@@ -31,7 +29,9 @@ extern "C" {
 #define IMDIN 14   // Check IMD OK signal from IMD directly
 #define BMSOUT LED_BUILTIN   // OUTPUT Fault Signal to BMS relay
 #define EEPROM_SIZE 5
-
+#define SHUTDOWN_MSG_PERIOD 200
+#define BCU_CMDMSG_PERIOD 100
+#define BMU_MONITORMSG_PERIOD 200
 
 /**************** Local Function Delcaration *******************/
 void BCUtoOBCWrite(_can_frame* BCUsent);
@@ -44,25 +44,26 @@ void CANreceive(_can_frame *receivePacket, void (*interpret)(_can_frame*));
 
 /**************** Setup Variables *******************/
 
-const int initFlagAddress = 0;  // Address to store initialization flag
-const byte initFlagValue = 0xAA; // Arbitrary non-zero value indicating initialized
 // Global Struct
 _can_frame sendmsg;
 _can_frame receivemsg;
 SDCstatus SDCstat;
-bool BCUSHUTDOWN_STATE = 1;
+// Communication Clock Reference
 unsigned long reference_time = 0;
 unsigned long reference_time2 = 0;
+unsigned long reference_time3 = 0;
 unsigned long beforeTimeout = 0;
-bool TIMEOUT_FLAG = false; // Which condition will reset this flag? , Repress the emergency Button
+unsigned long shutdownClock = 0;
+// Flag
+bool &TIMEOUT_FLAG = SDCstat.TIMEOUT_FLAG; // Alias name
+bool &SDC_OK_SIGNAL = SDCstat.SHUTDOWN_OK_SIGNAL; 
+bool &BMS_OK = SDCstat.BMS_OK;
+bool &IMD_OK = SDCstat.IMD_OK; 
+bool &BSPD_OK = SDCstat.BSPD_OK; 
+// bool TIMEOUT_FLAG = false; // Which condition will reset this flag? , Repress the emergency Button
 bool CHARGING_FLAG = false; // (May use External Interrupt to change this flag later)
-bool eepromWriteFlag = false; // Change this value to true if you want to update Default Parameter
-
-byte Timeout = EEPROM.read(0);
-byte VmaxCell = EEPROM.read(1);
-byte VminCell = EEPROM.read(2);
-byte Tmax = EEPROM.read(3);
-byte dVmax = EEPROM.read(4);
+bool EEPROM_WRITE_FLAG = false; // Change this value to true if you want to update Default Parameter
+byte Timeout ,VmaxCell ,VminCell ,TempMaxCell ,dVmax;
 
 
 //Class or Struct for Data logging ------------------------*****************------------------*//
@@ -70,7 +71,6 @@ byte dVmax = EEPROM.read(4);
 
 /*******************************************************************
   Setup Program
-  Routine Program
 ********************************************************************/
 
 void setup() {
@@ -84,155 +84,130 @@ void setup() {
   pinMode(IMDIN,INPUT_PULLDOWN);
   pinMode(BSPDIN,INPUT_PULLDOWN);
   
-  
   /* Write Default Parameter to EEPROM only once*/
-  EEPROM.begin(EEPROM_SIZE); // only for esp32 , that use virtual eeprom
-  if (eepromWriteFlag) {
-    Serial.println("write to EEPROM.");
-    EEPROM.write(0,4); // Timeout (byte) 4/1
-    EEPROM.write(1,42); // VcellMax (byte) 4.2/0.1
-    EEPROM.write(2,32); // VcellMin (byte) 3.2/0.1
-    EEPROM.write(3,60); // TempMax (byte) 60 / 1
-    EEPROM.write(4,2); // dvMax (byte) 0.2/0.1
-    EEPROM.commit();
-    Serial.println("Writing to EEPROM. complete");
+    EEPROM.begin(EEPROM_SIZE); // only for esp32 , that use virtual eeprom
+    if (EEPROM_WRITE_FLAG) {
+      Serial.println("write to EEPROM.");
+      EEPROM.write(0,4); // Timeout (byte) 4/1
+      EEPROM.write(1,42); // VcellMax (byte) 4.2/0.1
+      EEPROM.write(2,32); // VcellMin (byte) 3.2/0.1
+      EEPROM.write(3,60); // TempMax (byte) 60 / 1
+      EEPROM.write(4,2); // dvMax (byte) 0.2/0.1
+      EEPROM.commit();
+      Serial.println("Writing to EEPROM. complete");
+    }
+
+    // Display EEPROM Data
+    Serial.println("EEPROM Data:");
+    EEPROM.get(0,Timeout);
+    EEPROM.get(1,VmaxCell);
+    EEPROM.get(2,VminCell);
+    EEPROM.get(3,TempMaxCell);
+    EEPROM.get(4,dVmax);
     
-    // Display EEPROM Data
-    Serial.println("EEPROM Data:");
     byte defaultParam;
     for(short i; i<EEPROM_SIZE ;i++){
-      EEPROM.get(i,defaultParam);
-      Serial.println(defaultParam);
+      EEPROM.get(i,defaultParam); Serial.println(defaultParam);
     }
-
-  } else {
-    // Display EEPROM Data
-    Serial.println("EEPROM Data:");
-    byte defaultParam;
-    for(short i; i<EEPROM_SIZE ;i++){
-      EEPROM.get(i,defaultParam);
-      Serial.println(defaultParam);
-    }
-  }
-
-  /* Communication Setup */
-  CAN.setPins(DEFAULT_CAN_RX_PIN,DEFAULT_CAN_TX_PIN);
-  // CAN.filterExtended(id);
-  // CAN.filterExtended(id, mask);
-  if (!CAN.begin(STANDARD_BITRATE)) {
-    Serial.println("Starting CAN failed!");
-    while(1);
-  }
-  Serial.println("__BMS Master Initialized__");
   
-  // Dummy Setting , set what I want to be true
-    CHARGING_FLAG = false;
-    SDCstat.BMS_OK =1;
-    SDCstat.IMD_OK = 1;
-    SDCstat.BSPD_OK = 1;
+  /* Communication Setup */
+    CAN.setPins(DEFAULT_CAN_RX_PIN,DEFAULT_CAN_TX_PIN);
+    // CAN.filterExtended(id);
+    // CAN.filterExtended(id, mask);
+    if (!CAN.begin(STANDARD_BITRATE)) {
+      Serial.println("Starting CAN failed!");
+      while(1);
+    }
+    Serial.println("__BCU Initialized__");
   
 }
 
-bool timeoutprev;
+
+/*******************************************************************
+  Routine Program
+********************************************************************/
+
 void loop(){
 
-  // This section reads SDC , CHG_SDC , IMD, BSPD signal , proper logic shifting is needed
   // Read SHUTDOWN_OK_SIGNAL signal according to the actual physical voltages of shutdown circuit output
-  (digitalRead(SDCIN) || digitalRead(OBCIN)) ? (SDCstat.SHUTDOWN_OK_SIGNAL = 1) : (SDCstat.SHUTDOWN_OK_SIGNAL = 0);
+  // (digitalRead(SDCIN) ? (SDCstat.SHUTDOWN_OK_SIGNAL = 1) : (SDCstat.SHUTDOWN_OK_SIGNAL = 0);
+
   // Read IMD_Ok and BSPD_OK status from shutdown circuit
-  (digitalRead(IMDIN)) ? (SDCstat.IMD_OK = 1) : (SDCstat.IMD_OK = 0);
-  (digitalRead(BSPDIN)) ? (SDCstat.IMD_OK = 1) : (SDCstat.BSPD_OK = 0);
+  (digitalRead(IMDIN)) ? (IMD_OK = 1) : (IMD_OK = 0);
+  (digitalRead(BSPDIN)) ? (BSPD_OK = 1) : (SDCstat.BSPD_OK = 0);
   
   // Confirm if the Charger is actually plugged 
   (digitalRead(OBCIN)) ? (CHARGING_FLAG = true) : (CHARGING_FLAG = false);
 
-  // BMS_OK flag is determined in this mcu
-  
-  // Any form of Communication Timeout triggers BMS fault => Shutdown
-  if(TIMEOUT_FLAG == true){
-    // Keep previous state of timeout
-    // timeoutprev = TIMEOUT_FLAG;
-    SDCstat.BMS_OK = 0;
-    if(millis()-reference_time >= 300)
+
+  // case 0 : communication timeout, via wiring or protocol error , lock MCU in this condition loop
+  if( TIMEOUT_FLAG == true ) {
+
+    digitalWrite(BMSOUT,LOW);
+    if( millis()-shutdownClock >= SHUTDOWN_MSG_PERIOD ){
       Serial.println("BCU detected Communication Timeout");
+      shutdownClock = millis();
+    }
   }
-   
-  // // If previous state of TIMEOUT_FLAG is true , reset shutdown signal
-  // else if(!TIMEOUT_FLAG == true)
-  //   SDCstat.BMS_OK = 1;
-  // // if previous sate of TIMEOUT_FLAG is false , it goes back to Shutdown again ,
-  // after the third condition , next loop will run the first condition
-
-
-  // case 1 , Both operate Normally , BMS doesn't detect fault , and Shutdown signal is still high
-  if(SDCstat.BMS_OK == 1 && SDCstat.SHUTDOWN_OK_SIGNAL == 1){
-    digitalWrite(BMSOUT,HIGH);
-    // Reaffirm
-    SDCstat.BMS_OK = 1;
-    SDCstat.SHUTDOWN_OK_SIGNAL = 1;
-  } 
   
-  // case 3 BMS doesn't detect fault, but Shutdown signal already LOW due to other system fault : HIGH & LOW
-  else if (SDCstat.BMS_OK == 1 || SDCstat.SHUTDOWN_OK_SIGNAL == 0){
-      
-  }
+  // case 1: BMS detect fault , BMS_OK output LOW , while SHUTDOWN_OK_SIGNAL either read HIGH or LOW.
+  else if ( BMS_OK == 0 ) {
 
-  // case 2 BMS detect fault, while Shutdown signal is currently HIGH , confirmed fault caused by BMS : LOW & HIGH
-  else if (SDCstat.BMS_OK == 0 && SDCstat.SHUTDOWN_OK_SIGNAL == 1){
     digitalWrite(BMSOUT,LOW); 
-   // Reset CAN frame stucture
-    sendmsg = _can_frame();
-    receivemsg = _can_frame();
-
-    if(millis()-reference_time >= 300)
-      Serial.println("!SHUTDOWN!");
+    if( millis()-shutdownClock >= SHUTDOWN_MSG_PERIOD ){
+      Serial.println("BMS_COMMAND_SHUTDOWN!");
+      shutdownClock = millis();
+    }
   }
 
-  // case 4 , Both at fault 
+  // case 3 , Both BMS and SDC operate Normally , BMS output HIGH & SHUTDOWN_OK_SIGNAL read HIGH
+  else if( (BMS_OK == 1) && (SDC_OK_SIGNAL == 1) ) {
+
+    digitalWrite(BMSOUT,HIGH);
+    // Reaffirm BMS_OK & SHUTDOWN_OK_SIGNAL as Normal Operation
+    BMS_OK = 1;
+    SDC_OK_SIGNAL = 1;
+  } 
+
+  // case 3: Fault due to other system , BMS_OK HIGH , SHUTDOWN_OK_SIGNAL read LOW
   else {
     digitalWrite(BMSOUT,LOW); 
-   // Reset CAN frame stucture
-    sendmsg = _can_frame();
-    receivemsg = _can_frame();
-
-    if(millis()-reference_time >= 300)
-      Serial.println("!SHUTDOWN!");
+    if( millis()-shutdownClock >= SHUTDOWN_MSG_PERIOD){
+      Serial.println("OTHERSYSTEM_COMMAND_SHUTDOWN");
+      shutdownClock = millis();
+    }
   }
 
+  // Prepare CAN frame , then sent
+  // Receive CAn frame , then interpret
   /*---------------------------------------------Driving Event Routine*/
 
+  // Do we need to Stop CAN communication during shutdown? 
+  // Shutdown Require manual reset on the circuit to 
+  // Timeout has automatic reset
+
   // BCU CMD <-> BMU Module Report
-  if(millis()-reference_time >= 200){
-
-    // CANsend(&sendmsg,BCUtoBMUwrite); // Broadcast to BMU
-    // CANreceive(&receivemsg,BCUreadBMU);
-
-
-    // The problem occurs when CAN msg no longer recieved , but interpretation still keep the message going even after shutdown
-    // At shutdown we can do 2 things
-    // 1. reset can frame structure, but it is temporary , 
-    // 2. make CAN receive , send , recieve call back argument, by passing function name -> bcu write, bcu...
-  }
-
-  //  <- BMU Cell monitoring
-  if(millis()-reference_time >= 300){
-
+  if( millis()-reference_time >= 100 ){
+    CANsend(&sendmsg,BCUtoBMUwrite); // Broadcast to BMU
     CANreceive(&receivemsg,BCUreadBMU);
     reference_time = millis();
   }
+
+  //  BCU <- BMU Cell monitoring
+  if( millis()-reference_time >= 200 ){
+    CANreceive(&receivemsg,BCUreadBMU);
+    reference_time2 = millis();
+  }
+
+  // Data still logging even after shutdown , it needs
 
 /*---------------------------------------------Charging Event Routine*/
   
   // BCU OBC Communication (500ms cycle time)
   if(millis()-reference_time2 >= 500 && CHARGING_FLAG) {
-    
-    // Prepare CAN frame , then sent
-    // Receive CAn frame , then interpret
     CANsend(&sendmsg,BCUtoOBCWrite);
     CANreceive(&receivemsg,BCUreadOBC);
-
-
-    reference_time2 = millis();
+    reference_time3 = millis();
   }
 } // Publish as ROS topics
  
@@ -240,55 +215,47 @@ void loop(){
   Local Functions Definition
 ********************************************************************/
 
-// Why message transmit so much , it's like transmitting , 8 packet per cycle time?
+
 void CANsend(_can_frame *sendPacket, void (*prepare)(_can_frame*)) {
   prepare(sendPacket);
-  CAN.beginExtendedPacket(sendPacket->can_id, sendPacket->can_dlc);
-  // CAN.write(sendPacket->data[0]);
-  // CAN.write(sendPacket->data[1]);
-  // CAN.write(sendPacket->data[2]);
-  // CAN.write(sendPacket->data[3]);
-  // CAN.write(sendPacket->data[4]);
-  // CAN.write(sendPacket->data[5]);
-  // CAN.write(sendPacket->data[6]);
-  // CAN.write(sendPacket->data[7]);
+  CAN.beginExtendedPacket(sendPacket->can_id,sendPacket->can_dlc);
   CAN.write(sendPacket->data,sendPacket->can_dlc);
   CAN.endPacket();
 }
+
 // use function pointer to pass a call back
 void CANreceive(_can_frame *receivePacket, void (*interpret)(_can_frame*)) {
   // Read Message (Turn this into function that I must passed _can_frame reference)
-    uint16_t packetSize = CAN.parsePacket();
-    byte i = 0; 
+  uint16_t packetSize = CAN.parsePacket();
+  byte i = 0; 
 
-    if (CAN.parsePacket() || CAN.peek() != -1) {
-      // if (CAN.parsePacket() || CAN.packetId() != -1) {
-      receivePacket->can_id = CAN.packetId();
-      receivePacket->can_dlc = packetSize;
+  if (CAN.parsePacket() || CAN.peek() != -1) {
+    // if (CAN.parsePacket() || CAN.packetId() != -1) {
+    receivePacket->can_id = CAN.packetId();
+    receivePacket->can_dlc = packetSize;
 
-      Serial.print("ID:"); Serial.println(CAN.packetId(), HEX);
-      Serial.print("DLC: "); Serial.println(packetSize);
-      Serial.print("Data: ");
-      
-      while (CAN.available()){
-        receivePacket->data[i] = CAN.read(); i++;
-        Serial.print(receivePacket->data[i],HEX); Serial.print(" ");
-      } Serial.println();
+    Serial.print("ID:"); Serial.println(CAN.packetId(), HEX);
+    Serial.print("DLC: "); Serial.println(packetSize);
+    Serial.print("Data: ");
+    
+    while (CAN.available()){
+      receivePacket->data[i] = CAN.read(); i++;
+      Serial.print(receivePacket->data[i],HEX); Serial.print(" ");
+    } Serial.println();
 
-      // Call back
-      interpret(receivePacket);
+    // Call back
+    interpret(receivePacket);
 
-      // Update Communication timer
-      TIMEOUT_FLAG = false;
-      beforeTimeout = millis();
-    } 
-    // If receiving nothingCheck Communication timeout
-    else if (millis()-beforeTimeout >= Timeout*1000){
-      TIMEOUT_FLAG = true;
-    }
+    // Update Communication timer
+    TIMEOUT_FLAG = false;
+    beforeTimeout = millis();
+  } 
+  // If receiving nothingCheck Communication timeout
+  else if (millis()-beforeTimeout >= Timeout*1000){
+    TIMEOUT_FLAG = true;
+  }
     
 }
-
 
 void BCUtoOBCWrite ( _can_frame* BCUsent ) {
   // There needs to be a 1st message to make the OBC not entering COMMUNICATION ERROR
@@ -333,21 +300,15 @@ void BCUreadOBC ( _can_frame* BCUreceived ) {
       
       /* Interpret OBC status, and decide on Shutdown command */
         uint8_t stat =  BCUreceived->data[4]; // Status Byte
-        uint16_t *bitarray_holder = checkstatLSB(stat);
-        
-        for (short i=0; i < 8; i++){
-          // Finding 1 inside the bitarray indicates fault status
-          
-        } Serial.println();
+        uint16_t *bitarray_holder = toBitarrayLSB(stat);
 
       // Intepret Individual bit meaning
       Serial.print("OBC status: "); 
       for (short i =0 ; i <8 ; i++){
         Serial.print(bitarray_holder[i],HEX);
-        if(bitarray_holder[i] == 1)
-            SDCstat.BMS_OK = 0;
-        }
-      Serial.println();
+        // Finding 1 inside the bitarray indicates fault status
+        (bitarray_holder[i] == 1) ? (BMS_OK = 0) : (BMS_OK = 1); 
+      } Serial.println();
 
       switch (bitarray_holder[0]) {
         case 1:
@@ -366,7 +327,7 @@ void BCUreadOBC ( _can_frame* BCUreceived ) {
       }
       switch (bitarray_holder[3]) {
         case 1:
-          Serial.println("Charger detects: ZERO Vbatt");
+          Serial.println("Charger detects: NO BATTERY VOLTAGES");
           break;
       }
       switch (bitarray_holder[4]) {
@@ -377,26 +338,28 @@ void BCUreadOBC ( _can_frame* BCUreceived ) {
     } 
 }
 
-void BCUtoBMUwrite ( _can_frame* BCUsent ) {
+void BCUtoBMUwrite ( _can_frame* BCUsent, int moduleNum) {
     
     /* Set up BMS CAN frame*/
-    BCUsent->can_id  = 0x0CE00000;
-    BCUsent->can_dlc = 8;
+      // BCUsent->can_id  = 0x0CE00000;
+      BCUsent->can_id  = createExtendedCANID(0x00,0xCE,0x01,0xE5,0x00);
+      BCUsent->can_dlc = 8;
 
     // Condition 1 Charging Event
     // Condition 2 Driving Event
-    if(SDCstat.BMS_OK == 1) {
-      BCUsent->data[0] = 0b0000; 
-    } else {
-      BCUsent->data[0] = 0x00; // V highbyte 
-    } 
-    BCUsent->data[2] = (byte)Timeout/1;
-    BCUsent->data[3] = (byte)VmaxCell/0.1; 
-    BCUsent->data[4] = (byte)VminCell/0.1; 
-    BCUsent->data[5] = (byte)Tmax/1; 
-    BCUsent->data[6] = (byte)dVmax/0.1;
-    // Resereved byte
-    BCUsent->data[7] = 0x00;
+      if(CHARGING_FLAG) {
+        BCUsent->data[0] = 0b0001; // if BMU read this status , it will activate cell balancing discharge
+      } else {
+        BCUsent->data[0] = 0x00; 
+      } 
+    BCUsent->data[1] = moduleNum;
+    BCUsent->data[2] = Timeout;
+    BCUsent->data[3] = VmaxCell; 
+    BCUsent->data[4] = VminCell; 
+    BCUsent->data[5] = TempMaxCell; 
+    BCUsent->data[6] = dVmax;
+    BCUsent->data[7] = 0x00; // Reserved
+    
 }
 
 
@@ -427,20 +390,18 @@ void BCUreadBMU ( _can_frame* BCUreceived ) {
       
       Serial.print("BMU Operation Status (LSB)"); Serial.print(":");
       optstatusbit = BCUreceived->data[0];
-      bitarray_holder = checkstatLSB(optstatusbit);
+      bitarray_holder = toBitarrayLSB(optstatusbit);
       for (short i=0; i < 8; i++){
+
         Serial.print(bitarray_holder[i]);
         // Finding 1 inside the bitarray indicates fault status
-        if(bitarray_holder[i] == 1)
-          SDCstat.BMS_OK = 0;
+        (bitarray_holder[i] == 1) ? (BMS_OK = 0) : (BMS_OK = 1); 
       } Serial.println();
+
       // Interpret BitArray
         // Save Data to Data Log data
         // Datalog = OPT_BITARRAY
-
-      // Change this one to instead of passing specific struct, just return bool , and use external if-else to set the struct stat
-      // also return stat array (dynamic array) , then we can shove that statarray to any struct array later 
-      // SDC status will now be enumerator? with 3 levels of 
+      // SDC status will now be enumerator? with 3 levels of warning??
       Serial.println();
       break;
 
@@ -449,6 +410,7 @@ void BCUreadBMU ( _can_frame* BCUreceived ) {
       
       Serial.print("Module No.");Serial.println(decodedCANID.SRC);
       for(short i; i<8; i++){
+
         Serial.print("VCell"); Serial.print(i+1); Serial.print(":");
         V_cell[i] = BCUreceived->data[i]*0.02;
         Serial.print(V_cell[i]); Serial.println("V");
@@ -460,6 +422,7 @@ void BCUreadBMU ( _can_frame* BCUreceived ) {
       Serial.print("Module No.");Serial.println(decodedCANID.SRC);
       for(short i; i<8; i++){
         if( i<2 ) {
+
           Serial.print("VCell"); Serial.print(9+i); Serial.print(":");
           V_cell[i] = BCUreceived->data[i]*0.02;
           Serial.print(V_cell[i]); Serial.println("V");
@@ -470,36 +433,34 @@ void BCUreadBMU ( _can_frame* BCUreceived ) {
           Serial.print(Temp_cell[i-2]); Serial.println("C");
           
         } else if ( i == 5 ) {
+
           // May change to direct sensor reading 
           Serial.print("Module Discharged Current"); Serial.print(":");
           currentsense = BCUreceived->data[i];
           Serial.print(currentsense); Serial.println("A");
 
         } else {
+
           Serial.print("Cell balancing discharge"); Serial.print(":");
           balanceNum = BCUreceived->data[i];
-          bitarray_holder = checkstatLSB(balanceNum);
+          bitarray_holder = toBitarrayLSB(balanceNum);
           for (short i=0; i < 8; i++){
+
             Serial.print(bitarray_holder[i]);
-            // Finding 1 inside the bitarray indicates fault status
-            if(bitarray_holder[i] == 1)
-              SDCstat.BMS_OK = 0;
+            // Finding 1 inside the bitarray indicates cell balancing discharg
+            // (bitarray_holder[i] == 1) ? (BMS_OK = 0) : (BMS_OK = 1); 
           } Serial.println();
 
           // Interpret bit array to see which cell is performing cell balancing
-          // Need function to check binary position in LSB or MSB,
-          // checkstatLSB(); 
-          // Change this one to instead of passing specific struct, just return bool , and use external if-else to set the struct stat
-          // also return stat array (dynamic array) , then we can shove that statarray to any struct array later 
           Serial.println(balanceNum); 
+          // Interpret BitArray
+            // Save Data to Data Log data
+            // Datalog = bitarrayholder
         }
       }
       break;
     }
-    
   }
-
-
 }
 
 // BMS read SDC function

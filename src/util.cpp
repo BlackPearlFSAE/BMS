@@ -1,18 +1,4 @@
-#include <iostream>
-#include <stdio.h>
-#include <cstring>
 #include <util.h>
-#include <Arduino.h>
-// #include <ArduinoSTL.h>
-
-
-// enum SDCSTATUS{
-//   OK = 2,
-//   WARNING = 1,
-//   NOT_OK = 0
-
-// };
-
 
 /*------------------------------ General Functions ----*/
 // Split uint16_t to High byte and Low byte
@@ -57,88 +43,46 @@ float Decode_bytearray(unsigned char* c) {
     // Check for bit 1 for immediate shutdown
 
 
-// Split check and convert to bitarray with respect to MSB
-uint16_t *toBitarrayMSB(unsigned char num){
-  static uint16_t bitarr[8]; // array to hold 8 binary number
-  for (int i = 7; i >= 0; i--){
-    uint8_t bit = num & 1;
+// Convert N bit binary to 16 bit array from MSB-first (big endian) 
+bool *toBitarrayMSB(uint16_t num){
+  static bool bitarr[16]; // array to hold 8 binary number
+  for (int i = 15; i >= 0; i--){
+    bool bit = num & 1;
     bitarr[i] = bit;
     num >>= 1; // Right Shift num by 1 pos. before next loop , we AND with 1 again
   } 
   return bitarr; 
 }
 
-// Split check and convert to bitarray with respect to LSB
-uint16_t *toBitarrayLSB(unsigned char num){
-  static uint16_t bitarr[8]; // array to hold 8 binary number
-  for (int i = 0; i < 8; i++){
-    uint8_t bit = num & 1;
+// Convert N bit binary to 16 bit array from LSB-first (little endian)
+bool *toBitarrayLSB(uint16_t num){
+  static bool bitarr[16]; // array to hold 8 binary number
+  for (int i = 0; i < 16; i++){
+    bool bit = num & 1;
     bitarr[i] = bit;
     num >>= 1; // Right Shift num by 1 pos. before next loop , we AND with 1 again
   } 
   return bitarr; 
 }
 
-// /*------------------------------ Shutdown Circuit Functions ----*/
-// void checkstatMSB(SDCstatus* STAT, unsigned char num){
-//   // static uint8_t arr[8]; // array to hold 8 binary number
-//   // STAT->shutdownsig = 1;
-//   for (int i = 7; i >= 0; i--){
-//     uint8_t bit = num & 1;
-//     STAT->statbin[i] = bit;
-
-//     // This is for immediate shutdown , might change
-//     if(bit == 1){
-//         STAT->SHUTDOWN_OK = 0;
-//     }
-//     num >>= 1; 
-//   } 
-// }
-
-// void checkstatLSB(SDCstatus* STAT, unsigned char num){
-//   // static uint8_t arr[8]; // array to hold 8 binary number
-//   // STAT->shutdownsig = 1;
-//   for (int i = 0; i < 8; i++){
-//     uint8_t bit = num & 1;
-//     STAT->statbin[i] = bit;
-
-//     // This is for immediate shutdown , might change
-//     if(bit == 1){
-//         STAT->SHUTDOWN_OK = 0;
-//     }
-//     num >>= 1;
-//   } 
-// }
-
-
-
-/*------------------------------ CAN comminication Functions ----
------(Check the spreadsheet in README.md for CAN ID custom rules)*/
-
-// 1 CE 1 0A 00
-// 0001 1100 1110 0001 0000 1010 0000 0000
-
-// Create Extended CAN ID of Priority , BaseID , msg Number , src , dest 
-uint32_t createExtendedCANID(uint8_t PRIORITY, uint8_t BASE_ID, uint8_t MSG_NUM ,uint8_t SRC_ADDRESS, uint8_t DEST_ADDRESS) {
-    uint32_t canID = 0;
-    canID |= ((PRIORITY & 0x1F) << 28);        // (X)Priority (bits 29)
-    canID |= ((BASE_ID & 0xFF) << 20);         // (BB) Base id denotes CAN channel (bit 28-20)
-    canID |= ((MSG_NUM & 0xFF) << 16);         // (X) Message number (bits 19-16)
-    canID |= ((SRC_ADDRESS & 0xFF) << 8);      // (SS)Source BMU address (bits 15-8)
-    canID |= DEST_ADDRESS;                     // (DD)Destination BCU address (bits 7-0)
-    return canID;
+// Convert MSB-first bit array back to uint16_t
+uint16_t toUint16FromBitarrayMSB(const bool *bitarr) {
+    uint16_t num = 0;
+    for (int i = 0; i < 16; i++) {
+        if (bitarr[i]) {
+            num |= (1 << (15 - i));
+        }
+    }
+    return num;
 }
 
-// Decode extended CAN ID
-void decodeExtendedCANID(struct CANIDDecoded* myCAN ,uint32_t canID) {
-    
-    myCAN->PRIORITY = (canID >> 28) & 0x1F;        // Extract priority (bits 29)
-    myCAN->BASE_ID = (canID >> 20) & 0xFF;         // Extract Message Number (bits 28-20)
-    myCAN->MSG_NUM = (canID >> 16) & 0x0F;         // Extract Message Number (bits 19-16)
-    myCAN->SRC = (canID >> 8) & 0xFF;              // Extract Source Address (bits 15-8)
-    myCAN->DEST = canID & 0xFF;                    // Extract destination address (bits 7-0)
-    
+// Convert LSB-first bit array back to uint16_t
+uint16_t toUint16FromBitarrayLSB(const bool *bitarr) {
+    uint16_t num = 0;
+    for (int i = 0; i < 16; i++) {
+        if (bitarr[i]) {
+            num |= (1 << i);
+        }
+    }
+    return num;
 }
-
-
-// BMS data structure

@@ -18,7 +18,7 @@ struct SDCstatus { // Need to change to more specific name
   uint8_t statbin[8];
   bool shutdownsig = 1; // Default should be 1 = OK , 0 = SHUTDOWN
 };
-void checkstatLSB(SDCstatus* STAT, unsigned char num);
+// void checkstatLSB(SDCstatus* STAT, unsigned char num);
 
 // --BMS Specific Util
 

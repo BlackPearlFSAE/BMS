@@ -2,6 +2,12 @@
   "files.associations": {
     "array": "cpp",
     "string": "cpp",
-    "string_view": "cpp"
+    "string_view": "cpp",
+    "locale": "cpp",
+    "bitset": "cpp",
+    "deque": "cpp",
+    "sstream": "cpp",
+    "valarray": "cpp",
+    "vector": "cpp"
   }
 }

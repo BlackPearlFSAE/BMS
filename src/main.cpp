@@ -73,6 +73,7 @@ In this sketch book:
 #include <stdint.h>
 #include <SPI.h>
 #include <mcp2515.h>
+// #include <mcp_can.h>
 #include "Linduino.h"
 #include "LT_SPI.h"
 #include "LT_I2C.h"
@@ -89,7 +90,7 @@ In this sketch book:
 #define DATALOG_DISABLED 0
 
 /**************** Local Function Declaration *******************/
-void measurement_loop(uint8_t datalog_en);
+void measurement_loop(uint8_t datalog_en, int timeOut, int sync, int charging, int balanceActive, int voltFull);
 void print_menu(void);
 void print_wrconfig(void);
 void print_rxconfig(void);
@@ -117,6 +118,11 @@ void serial_print_hex(uint8_t data);
 char read_hex(void);
 char get_char(void);
 void run_command(uint32_t cmd);
+
+
+void packCANData(int timeOut, int sync, int charging, int balanceActive, int voltFull);
+void packCANData2(int cell, float voltage, float temp);
+void sendCANFrame();
 /*******************************************************************
   Setup Variables
   The following variables can be modified to configure the software.
@@ -124,11 +130,17 @@ void run_command(uint32_t cmd);
 const uint8_t TOTAL_IC = 1; //!< Number of ICs in the daisy chain
 const uint8_t CELL_PER_IC = 12;
 
-uint8_t dataF[8]; // payload for CAN
-uint8_t dataF2[8];
+int timeOut = 0;
+int sync = 0;
+int charging = 0;
+int balanceActive = 0;
+int voltFull = 0;
+
+// uint8_t dataF[8]; // payload for CANN
+// uint8_t dataF2[8];
 uint8_t fault;
-_can_frame frame;
-_can_frame frame2;
+can_frame frame;
+can_frame frame2;
 
 // ADC Command Configurations. See LTC681x.h for options.
 const uint8_t ADC_OPT = ADC_OPT_DISABLED;         //!< ADC Mode option bit
@@ -180,25 +192,39 @@ bool DCTOBITS[4] = {true, false, true, false};                                  
 /*Ensure that Dcto bits are set according to the required discharge time. Refer to the data sheet */
 
 /*!**********************************************************************
- \brief  Initializes hardware and variables
- @return void
+
  ***********************************************************************/
 // const int spiCSPin = 10;
-// MCP_CAN CAN(spiCSPin);
+// MCP_CAN CANN(spiCSPin);
 float cellVoltage;
 float cell_voltage[TOTAL_IC][CELL_PER_IC];
 
+
+// Initialize the MCP_CAN object
+MCP2515 mcp2515(10);
+
 void setup()
 {
-  Serial.begin(9600);
-  // while (CAN_OK != CAN.begin(MCP_ANY, CAN_500KBPS, MCP_16MHZ))
-  // {
-  //     Serial.println("CAN BUS init Failed");
-  //     delay(100);
-  // }
-  // Serial.println("CAN BUS Shield Init OK!");
-  // unsigned char stmp[8] = {ledHIGH, 1, 2, 3, ledLOW, 5, 6, 7};
+  wakeup_sleep(TOTAL_IC);
+  LTC6811_wrcfg(TOTAL_IC, BMS_IC);
+  frame.can_id  = 0x0F6;
+  frame.can_dlc = 8;
 
+  frame2.can_id  = 0x036;
+  frame2.can_dlc = 8;
+ 
+  
+  while (!Serial);
+  Serial.begin(115200);
+  
+  mcp2515.reset();
+  mcp2515.setBitrate(CAN_500KBPS);
+  mcp2515.setNormalMode();
+  
+  Serial.println("Example: Write to CAN");
+
+  // Initialize frames
+  
   quikeval_SPI_connect();
   spi_enable(SPI_CLOCK_DIV16); // This will set the Linduino to have a 1MHz Clock
   LTC6811_init_cfg(TOTAL_IC, BMS_IC);
@@ -217,20 +243,25 @@ void setup()
 ***********************************************************************/
 void loop()
 {
-  if (Serial.available()) // Check for user input
-  {
-    uint32_t user_command;
-    user_command = read_int(); // Read the user command
-    if (user_command == 'm')
-    {
-      print_menu();
-    }
-    else
-    {
-      Serial.println(user_command);
-      run_command(user_command);
-    }
-  }
+  // Serial.println("dww");
+  // mcp2515.sendMessage(&frame);
+  // mcp2515.sendMessage(&frame2);
+  delay(100);
+  measurement_loop(DATALOG_DISABLED, timeOut, sync, charging, balanceActive, voltFull);
+  // if (Serial.available()) // Check for user input
+  // {
+  //   uint32_t user_command;
+  //   user_command = read_int(); // Read the user command
+  //   if (user_command == 'm')
+  //   {
+  //     print_menu();
+  //   }
+  //   else
+  //   {
+  //     Serial.println(user_command);
+  //     run_command(user_command);
+  //   }
+  // }
 }
 
 /*!*****************************************
@@ -291,7 +322,7 @@ void run_command(uint32_t cmd)
     print_aux(DATALOG_DISABLED);
     break;
 
-  case 7: // Start Status ADC Measurement
+  case 7: // Start Status ADC Measurement 
     wakeup_sleep(TOTAL_IC);
     LTC6811_adstat(ADC_CONVERSION_MODE, STAT_CH_TO_CONVERT);
     conv_time = LTC6811_pollAdc();
@@ -338,14 +369,14 @@ void run_command(uint32_t cmd)
   case 11: // Loop Measurements of configuration register or cell voltages or auxiliary register or status register without data-log output
     wakeup_sleep(TOTAL_IC);
     LTC6811_wrcfg(TOTAL_IC, BMS_IC);
-    measurement_loop(DATALOG_DISABLED);
+    // measurement_loop(DATALOG_DISABLED, timeOut,sync,charging,balanceActive,voltFull);
     print_menu();
     break;
 
   case 12: // Data-log print option Loop Measurements of configuration register or cell voltages or auxiliary register or status register
     wakeup_sleep(TOTAL_IC);
     LTC6811_wrcfg(TOTAL_IC, BMS_IC);
-    measurement_loop(DATALOG_ENABLED);
+    // measurement_loop(DATALOG_ENABLED);
     print_menu();
     break;
 
@@ -648,7 +679,7 @@ void run_command(uint32_t cmd)
     check_error(error);
     print_rxcomm(); // print received data from the comm register
     break;
-
+  
   case 31: // Set or reset the gpio pins(to drive output on gpio pins)
     /***********************************************************************
      Please ensure you have set the GPIO bits according to your requirement
@@ -676,24 +707,19 @@ void run_command(uint32_t cmd)
 }
 
 int slot = 0;
+
 /*!**********************************************************************************************************************************************
  \brief For writing/reading configuration data or measuring cell voltages or reading aux register or reading status register in a continuous loop
  @return void
 *************************************************************************************************************************************************/
-void measurement_loop(uint8_t datalog_en)
+void measurement_loop(uint8_t datalog_en, int timeOut, int sync, int charging, int balanceActive, int voltFull)
 {
-  int temp = 25;
+  float temp = 25.0;
   int8_t error = 0;
-  char input = 0;
+  // char input = 0;
 
   Serial.println(F("Transmit 'm' to quit"));
 
-  while (input != 'm')
-  {
-    if (Serial.available() > 0)
-    {
-      input = read_char();
-    }
     if (WRITE_CONFIG == ENABLED)
     {
       wakeup_sleep(TOTAL_IC);
@@ -718,17 +744,19 @@ void measurement_loop(uint8_t datalog_en)
       error = LTC6811_rdcv(SEL_ALL_REG, TOTAL_IC, BMS_IC);
       check_error(error);
       print_cells(datalog_en);
-      // uint8_t check = 0;
+      
       for (int ic = 0; ic < TOTAL_IC; ic++)
       {
         Serial.print("IC: ");
         Serial.println(ic + 1);
-
+        int sumVolt=0;
         for (int cell = 0; cell < 16; cell++)
         {
           // Calculate cell voltage in volts
-          float cellVoltage = BMS_IC[ic].cells.c_codes[cell] * 0.0001;
-
+          float cellVoltage = 1.0;
+          sumVolt = sumVolt + cellVoltage;
+          Serial.print("Sum : ");
+          Serial.println(sumVolt);
           // Determine fault based on voltage
           if (cell + 1 <= 10)
           {
@@ -759,72 +787,29 @@ void measurement_loop(uint8_t datalog_en)
             }
           }
 
-          uint8_t voltageScaled = (uint8_t)(cellVoltage / 0.02);
+          // uint8_t voltageScaled = (uint8_t)(cellVoltage / 0.02);
 
-          // Print cell number, original voltage, and scaled voltage
-          Serial.print("Cell ");
-          Serial.print(cell + 1);
-          Serial.print(" - Voltage: ");
-          Serial.print(cellVoltage, 2);
-          Serial.print("V | Scaled: ");
-          Serial.println(voltageScaled);
-
-          // Map cell voltages to dataF and dataF2
-          if (cell + 1 <= 8)
-          {
-            frame.data[cell] = voltageScaled;
-            Serial.print("  Stored in dataF[");
-            Serial.print(cell);
-            Serial.print("]: ");
-            Serial.println(frame.data[cell]);
-          }
-          else if (cell + 1 == 9 || cell + 1 == 10)
-          {
-            // Cell 9 -> dataF2[0], Cell 10 -> dataF2[1]
-            frame2.data[cell-8] = voltageScaled;
-            Serial.print("  Stored in dataF2[");
-            Serial.print(cell - 8);
-            Serial.print("]: ");
-            Serial.println(frame2.data[cell-8]);
-          }
-          else if (cell + 1 >= 11 && cell + 1 <= 13)
-          {
-            // Cell 11 -> dataF2[2], Cell 12 -> dataF2[3], Cell 13 -> dataF2[4]
-            frame2.data[cell-8] = temp;
-            Serial.print("  Stored in dataF2[");
-            Serial.print(cell - 8);
-            Serial.print("]: ");
-            Serial.println(frame2.data[cell-8]);
-          }
-          else if(cell+1 == 14){
-            frame2.data[cell-8] = 2; //current
-            Serial.print("  Stored in dataF2[");
-            Serial.print(cell - 8);
-            Serial.print("]: ");
-            Serial.println(frame2.data[cell-8]);
-          }
-          else if(cell+1 >= 14 && cell+1<=16){
-            frame2.data[cell-8] = '00001111'; 
-            Serial.print("  Stored in dataF2[");
-            Serial.print(cell - 8);
-            Serial.print("]: ");
-            Serial.println(frame2.data[cell-8]);
-          }
+          packCANData(timeOut,sync,charging,balanceActive,voltFull);
+          sendCANFrame();
+          packCANData2(cell, cellVoltage, temp);
         }
 
         Serial.println();
       }
+
+  
+
       Serial.print("dataF[] ");
-      for(int w = 0;w<8;w++){
+      for (int w = 0; w < 8; w++)
+      {
         Serial.println(frame.data[w]);
-        // Serial.println(" ");
       }
+
       Serial.print("dataF2[] ");
-      for(int w = 0;w<8;w++){
+      for (int w = 0; w < 8; w++)
+      {
         Serial.println(frame2.data[w]);
-        // Serial.println(" ");
       }
-      
     }
 
     if (MEASURE_AUX == ENABLED)
@@ -855,8 +840,90 @@ void measurement_loop(uint8_t datalog_en)
     }
 
     delay(MEASUREMENT_LOOP_TIME);
+  
+}
+void packCANData(int timeOut, int sync, int charging, int balanceActive, int voltFull) {
+  //sync
+  if(sync){
+    frame.data[0] |= (1<<1);
+  } else {
+    frame.data[0] &= ~(1<<1);
+  }
+  //timeout
+  if(timeOut){
+    frame.data[0] |= (1<<2);
+  } else {
+    frame.data[0] &= ~(1<<2);
+  }
+  //charging
+  if(charging){
+    frame.data[0] |= (1<<3);
+  } else {
+    frame.data[0] &= ~(1<<3);
+  }
+  //balancaeActive
+  if(balanceActive){
+    frame.data[0] |= (1<<4);
+  } else {
+    frame.data[0] &= ~(1<<4);
+  }
+  //voltFull
+  if(voltFull){
+    frame.data[0] |= (1<<5);
+  } else {
+    frame.data[0] &= ~(1<<5);
+  }
+  
+  //balance cell number
+  frame.data[1] ;
+  frame.data[2] ;
+
+  //Vbattmodule
+  frame.data[3] ;
+
+  //dV
+  frame.data[4] ;
+
+  frame.data[5] ;
+
+  frame.data[6] ;
+
+  frame.data[7] ;
+  
+}
+
+void packCANData2(int cell, float voltage, float temp) {
+  // Scale voltage (assuming conversion needed)
+  byte voltageScaled = (byte)(voltage / 0.02);  // Example scaling
+  
+  // Frame 1 (first 8 cells)
+  if (cell + 1 <= 8) {
+    frame.data[cell] = voltageScaled;
+  }
+  
+  // Frame 2 (remaining data)
+  else if (cell + 1 == 9 || cell + 1 == 10) {
+    frame2.data[cell - 8] = voltageScaled;
+  }
+  
+  else if (cell + 1 >= 11 && cell + 1 <= 13) {
+    frame2.data[cell - 8] = (byte)(temp / 0.02);  // Temperature scaling
+  }
+  
+  else if (cell + 1 == 14) {
+    frame2.data[cell - 8] = 2; // current
+  }
+  
+  else if (cell + 1 >= 15 && cell + 1 <= 16) {
+    frame2.data[cell - 8] = 0xF;
   }
 }
+
+void sendCANFrame(){
+  mcp2515.sendMessage(&frame);
+  mcp2515.sendMessage(&frame2);
+}
+
 
 /*!*********************************
   \brief Prints the main menu

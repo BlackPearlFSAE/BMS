@@ -120,9 +120,10 @@ char get_char(void);
 void run_command(uint32_t cmd);
 
 
-void packCANData(int timeOut, int sync, int charging, int balanceActive, int voltFull);
+void packCANData(bool sync, bool timeOut, bool charging, bool balanceActive, bool voltFull, uint16_t balanceStatus, float vbatt, float deltaV, float temp1, float temp2);
 void packCANData2(int cell, float voltage, float temp);
 void sendCANFrame();
+void debugFrame1();
 /*******************************************************************
   Setup Variables
   The following variables can be modified to configure the software.
@@ -130,11 +131,14 @@ void sendCANFrame();
 const uint8_t TOTAL_IC = 1; //!< Number of ICs in the daisy chain
 const uint8_t CELL_PER_IC = 12;
 
-int timeOut = 0;
-int sync = 0;
-int charging = 0;
-int balanceActive = 0;
-int voltFull = 0;
+//variable for packCANData
+bool timeOut = 1;
+bool sync = 1;
+bool charging = 0;
+bool balanceActive = 0;
+bool voltFull = 0;
+float vbatt,deltaV,temp1,temp2;
+uint16_t balanceStatus;
 
 // uint8_t dataF[8]; // payload for CANN
 // uint8_t dataF2[8];
@@ -198,7 +202,7 @@ bool DCTOBITS[4] = {true, false, true, false};                                  
 // MCP_CAN CANN(spiCSPin);
 float cellVoltage;
 float cell_voltage[TOTAL_IC][CELL_PER_IC];
-
+// int sync, 
 
 // Initialize the MCP_CAN object
 MCP2515 mcp2515(10);
@@ -210,7 +214,7 @@ void setup()
   frame.can_id  = 0x0F6;
   frame.can_dlc = 8;
 
-  frame2.can_id  = 0x036;
+  frame2.can_id  = 0x0F6;
   frame2.can_dlc = 8;
  
   
@@ -246,7 +250,8 @@ void loop()
   // Serial.println("dww");
   // mcp2515.sendMessage(&frame);
   // mcp2515.sendMessage(&frame2);
-  delay(100);
+  
+  delay(1000);
   measurement_loop(DATALOG_DISABLED, timeOut, sync, charging, balanceActive, voltFull);
   // if (Serial.available()) // Check for user input
   // {
@@ -707,7 +712,7 @@ void run_command(uint32_t cmd)
 }
 
 int slot = 0;
-
+int state = 0;
 /*!**********************************************************************************************************************************************
  \brief For writing/reading configuration data or measuring cell voltages or reading aux register or reading status register in a continuous loop
  @return void
@@ -745,71 +750,93 @@ void measurement_loop(uint8_t datalog_en, int timeOut, int sync, int charging, i
       check_error(error);
       print_cells(datalog_en);
       
+      float vbatt=0;
+      
       for (int ic = 0; ic < TOTAL_IC; ic++)
       {
         Serial.print("IC: ");
         Serial.println(ic + 1);
-        int sumVolt=0;
+        // float omg = 100;
+        // Serial.println(sumVoltScale);
+        int count = 0;
         for (int cell = 0; cell < 16; cell++)
         {
-          // Calculate cell voltage in volts
-          float cellVoltage = 1.0;
-          sumVolt = sumVolt + cellVoltage;
-          Serial.print("Sum : ");
-          Serial.println(sumVolt);
+          
+          float cellVoltage = BMS_IC[ic].cells.c_codes[cell]*0.0001;
+          vbatt = vbatt + cellVoltage;
+          count = count + 1;
+          // Serial.print("count: ");
+          // Serial.println(count);
+          // Serial.print("Sum : ");
+          // Serial.println(sumVolt);
           // Determine fault based on voltage
           if (cell + 1 <= 10)
           {
             if (cellVoltage > 4.2)
             {
               fault = 2; // Overvoltage
-              Serial.print("Fault: Overvoltage ");
+              // Serial.print("Fault: Overvoltage ");
             }
             else if (cellVoltage < 3.0)
             {
               fault = 4; // Undervoltage
-              Serial.print("Fault: Undervoltage ");
+              // Serial.print("Fault: Undervoltage ");
             }
             else if ((cellVoltage > 4.1 && cellVoltage < 4.2))
             {
               fault = 1;
-              Serial.print("Fault: Warning Overvoltage ");
+              // Serial.print("Fault: Warning Overvoltage ");
             }
             else if ((cellVoltage > 3.0 && cellVoltage < 3.2))
             {
               fault = 4;
-              Serial.print("Fault: Warning Undervoltage ");
+              // Serial.print("Fault: Warning Undervoltage ");
             }
             else
             {
               fault = 0; // No fault
-              Serial.print("Fault: None ");
+              // Serial.print("Fault: None ");
             }
           }
-
+          // Serial.println(cell);
           // uint8_t voltageScaled = (uint8_t)(cellVoltage / 0.02);
+          // Serial.println("This is message 2");
+          
+          // if(state == 1){
+          //   packCANData2(cell, cellVoltage, temp);
 
-          packCANData(timeOut,sync,charging,balanceActive,voltFull);
-          sendCANFrame();
-          packCANData2(cell, cellVoltage, temp);
+          // }
+          // else if(state == 2){
+          //   packCANData(timeOut,sync,charging,balanceActive,voltFull,sumVoltScale);
+
+          // }
         }
+        // byte sumVoltScale = (byte)(sumVolt/ 0.2);   
+        packCANData(sync,timeOut,charging,balanceActive,voltFull,balanceStatus,vbatt,deltaV,temp1,temp2);  
+        debugFrame1();
 
+
+        
+        // Serial.println("packCanDataF[]");
+        // for (int w = 0; w < 8; w++)
+        // {
+        //   Serial.print(frame.data[w]);
+        //   Serial.println("");
+        // }
+
+        // Serial.println("packCanDataF2[] ");
+        // for (int w = 0; w < 8; w++)
+        // {
+        //   Serial.print(frame2.data[w]);
+        //   Serial.println("");
+        // }
+        // Serial.print("sumVoltScale : ");
+        // Serial.println(sumVoltScale);
         Serial.println();
+        sendCANFrame();
       }
 
   
-
-      Serial.print("dataF[] ");
-      for (int w = 0; w < 8; w++)
-      {
-        Serial.println(frame.data[w]);
-      }
-
-      Serial.print("dataF2[] ");
-      for (int w = 0; w < 8; w++)
-      {
-        Serial.println(frame2.data[w]);
-      }
     }
 
     if (MEASURE_AUX == ENABLED)
@@ -842,89 +869,115 @@ void measurement_loop(uint8_t datalog_en, int timeOut, int sync, int charging, i
     delay(MEASUREMENT_LOOP_TIME);
   
 }
-void packCANData(int timeOut, int sync, int charging, int balanceActive, int voltFull) {
-  //sync
-  if(sync){
-    frame.data[0] |= (1<<1);
-  } else {
-    frame.data[0] &= ~(1<<1);
-  }
-  //timeout
-  if(timeOut){
-    frame.data[0] |= (1<<2);
-  } else {
-    frame.data[0] &= ~(1<<2);
-  }
-  //charging
-  if(charging){
-    frame.data[0] |= (1<<3);
-  } else {
-    frame.data[0] &= ~(1<<3);
-  }
-  //balancaeActive
-  if(balanceActive){
-    frame.data[0] |= (1<<4);
-  } else {
-    frame.data[0] &= ~(1<<4);
-  }
-  //voltFull
-  if(voltFull){
-    frame.data[0] |= (1<<5);
-  } else {
-    frame.data[0] &= ~(1<<5);
-  }
-  
-  //balance cell number
-  frame.data[1] ;
-  frame.data[2] ;
-
-  //Vbattmodule
-  frame.data[3] ;
-
-  //dV
-  frame.data[4] ;
-
-  frame.data[5] ;
-
-  frame.data[6] ;
-
-  frame.data[7] ;
-  
+void packCANData(bool sync, bool timeOut, bool charging, bool balanceActive, bool voltFull, 
+                  uint16_t balanceStatus, float vbatt, float deltaV, float temp1, float temp2) {
+    
+    // Byte 0 - Status flags
+    frame.data[0] = 0; // Clear all bits first
+    if(sync) frame.data[0] |= (1<<1);
+    if(timeOut) frame.data[0] |= (1<<2);
+    if(charging) frame.data[0] |= (1<<3);
+    if(balanceActive) frame.data[0] |= (1<<4);
+    if(voltFull) frame.data[0] |= (1<<5);
+    
+    // Byte 1-2 - Balance cell status (10-bit representation)
+    frame.data[1] = (balanceStatus >> 8) & 0xFF;  // High byte
+    frame.data[2] = balanceStatus & 0xFF;         // Low byte
+    
+    // Byte 3 - Vbatt (0-42.0V, scale 0.2V per unit)
+    frame.data[3] = (byte)(vbatt / 0.2);
+    
+    // Byte 4 - Delta V (0-0.2V, scale 0.1V per unit)
+    frame.data[4] = (byte)(deltaV / 0.1);
+    
+    // Byte 5 - Temperature 1
+    // Vsense = 2 + (Raw × 0.0125)
+    // Therefore: Raw = (Vsense - 2) / 0.0125
+    byte temp1Raw = (byte)((temp1 - 2.0) / 0.0125);
+    frame.data[5] = temp1Raw;
+    
+    // Byte 6 - Temperature 2
+    byte temp2Raw = (byte)((temp2 - 2.0) / 0.0125);
+    frame.data[6] = temp2Raw;
+    
+    // Byte 7 - Reserved (for SOC/SOH)
+    frame.data[7] = 0;  // Currently unused
 }
 
 void packCANData2(int cell, float voltage, float temp) {
   // Scale voltage (assuming conversion needed)
-  byte voltageScaled = (byte)(voltage / 0.02);  // Example scaling
-  
+  // Serial.print("this is message 2");
+  byte voltageScaled = (byte)(voltage / 0.02);
   // Frame 1 (first 8 cells)
   if (cell + 1 <= 8) {
     frame.data[cell] = voltageScaled;
   }
-  
+  if (cell+1 >= 9 && cell + 1 <= 10) {
+    frame2.data[cell-8] = voltageScaled;
+  }
+  if (cell + 1 >= 11 && cell+1 <= 16) {
+    frame2.data[cell-8] = 0;
+  }
+  state = 1;
   // Frame 2 (remaining data)
-  else if (cell + 1 == 9 || cell + 1 == 10) {
-    frame2.data[cell - 8] = voltageScaled;
-  }
+  // else if (cell + 1 == 9 || cell + 1 == 10) {
+  //   frame2.data[cell - 8] = voltageScaled;
+  // }
   
-  else if (cell + 1 >= 11 && cell + 1 <= 13) {
-    frame2.data[cell - 8] = (byte)(temp / 0.02);  // Temperature scaling
-  }
+  // else if (cell + 1 >= 11 && cell + 1 <= 13) {
+  //   frame2.data[cell - 8] = (byte)(temp / 0.02);  // Temperature scaling
+  // }
   
-  else if (cell + 1 == 14) {
-    frame2.data[cell - 8] = 2; // current
-  }
+  // else if (cell + 1 == 14) {
+  //   frame2.data[cell - 8] = 2; // current
+  // }
   
-  else if (cell + 1 >= 15 && cell + 1 <= 16) {
-    frame2.data[cell - 8] = 0xF;
-  }
+  // else if (cell + 1 >= 15 && cell + 1 <= 16) {
+  //   frame2.data[cell - 8] = 0xF;
+  // }
+  
+  // Serial.print("packCanDataF2[]");
+  // for (int w = 0; w < 8; w++)
+  // {
+  //   Serial.print(frame2.data[w]);
+  //   Serial.println("");
+  // }
 }
 
 void sendCANFrame(){
+  Serial.println("sent");
   mcp2515.sendMessage(&frame);
   mcp2515.sendMessage(&frame2);
 }
 
-
+void debugFrame1() {
+    Serial.println("Frame 1 Data:");
+    // Status bits
+    Serial.print("Status (0b");
+    for (int i = 7; i >= 0; i--) {
+        Serial.print((frame.data[0] >> i) & 0x01);
+    }
+    Serial.println(")");
+    
+    // Balance status
+    uint16_t balanceStatus = (frame.data[1] << 8) | frame.data[2];
+    Serial.print("Balance Status: 0b");
+    for (int i = 9; i >= 0; i--) {
+        Serial.print((balanceStatus >> i) & 0x01);
+    }
+    Serial.println();
+    
+    // Voltages and temperatures
+    float vbatt = frame.data[3] * 0.2;
+    float deltaV = frame.data[4] * 0.1;
+    float temp1 = 2.0 + (frame.data[5] * 0.0125);
+    float temp2 = 2.0 + (frame.data[6] * 0.0125);
+    
+    Serial.print("Vbatt: "); Serial.print(vbatt); Serial.println("V");
+    Serial.print("Delta V: "); Serial.print(deltaV); Serial.println("V");
+    Serial.print("Temp1 Vsense: "); Serial.print(temp1); Serial.println("V");
+    Serial.print("Temp2 Vsense: "); Serial.print(temp2); Serial.println("V");
+}
 /*!*********************************
   \brief Prints the main menu
  @return void

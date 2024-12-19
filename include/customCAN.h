@@ -10,7 +10,7 @@ struct _can_frame {
 
   // Constructor function , to reset and initialize ID to nothing , and data frame to all 0
   _can_frame() 
-        : can_id(0), can_dlc(0) {
+        : can_id(0), can_dlc(8) {
         memset(data, 0, sizeof(data));
         } 
 };

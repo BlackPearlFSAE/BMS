@@ -31,3 +31,10 @@ Aggregate data from BMS and Safety circuit to Telemetry system
 Checkout this spreadsheet for how BMS interact with other subsystem <br>
 How various data are aggregated and handle to Telemetry System that will make use of it the most.
 https://1drv.ms/x/c/d079ad5b2828ff79/EcjwKipZkZRGtMpphnwD8aABigw9Ukt2hv3MfdNIQ77VwQ?e=KX4nT4
+
+
+
+
+// BMU Module Report , BMU individual cell report (2 monitoring message per module) (200ms cycle)
+// Message reception sequencing :: 200 ms / 8  = 25 ms / module
+// Each module will have its own algorithm to calculate the time : eg. 200ms/8 * src address ,src add = 0x01-0x08

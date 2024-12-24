@@ -30,7 +30,6 @@ bool CANreceive(_can_frame *receivePacket, void (*interpret)(_can_frame*)) {
 
     // Call back
     interpret(receivePacket);
-    Serial.println();
 
   return 1;
 }
@@ -45,7 +44,7 @@ bool CANreceive(_can_frame *receivePacket) {
     
     while (CAN.available()){
       receivePacket->data[i] = CAN.read(); i++;
-    } Serial.println();
+    } 
 
   return 1;
 }

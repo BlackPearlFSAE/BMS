@@ -18,7 +18,8 @@ RTOS and Push ROS topics
 // #include <micro_ros_arduino.h>
 // #include <freertos/
 // utility function
-
+// #include <driver/timer.h>
+#include <Ticker.h>
 #include <Arduino.h>
 #include <CAN.h>
 #include <EEPROM.h>
@@ -50,21 +51,27 @@ RTOS and Push ROS topics
 void BCUtoOBC_cmd_messagePrep ( _can_frame* BCUsent , bool cmd);
 void BCUtoBMU_cmd_messagePrep ( _can_frame* BCUsent);
 void BCUmonitorOBC ( _can_frame* BCUreceived );
-void debugBMUmsg();
-void debugBMUFault();
+void debugBMUmsg(int Module);
+void debugBMUFault(int Module);
 void debugOBCmsg();
+void debugSDC();
 void BCUmonitorBMU ( _can_frame* BCUreceived);
 
 /**************** Setup Variables *******************/
 // Maybe I'll change them to typedef in case of C compatibility??
-
 // CAN structure
 _can_frame sendmsg;
 _can_frame receivemsg;
-// _can_frame receivemsg[8];
+
+// Ticker , non-block timer 
+Ticker ticker1; // Debugging BMU Cell msg
+Ticker ticker2; // Debugging BMU Fault code msg
+Ticker ticker3; // Debugging OBC Fault code msg
+Ticker ticker4; // Debugging OBC Fault code msg
+hw_timer_t *My_timer1 = NULL;
+hw_timer_t *My_timer2 = NULL;
 
 // Data Aggregation , and Relay to Other Sub System , e.g. Telemetry , DataLogger, BMS GUI
-
 // Physical condition of LV Circuit , safety information , and relay it to Telemetry system
 struct SDCstatus {
   bool SHUTDOWN_OK_SIGNAL = 1; // AIR+
@@ -75,7 +82,6 @@ struct SDCstatus {
 
 // Report BMS data, and Faulty status code // Serialize this data in 8 bit buffer
 struct BMSdata {
-
   // Basic BMU Data
   uint8_t V_CELL[CELL_NUM];
   uint8_t TEMP_SENSE[TEMP_SENSOR_NUM];
@@ -104,7 +110,7 @@ struct BMSdata {
         memset(V_CELL, 0, sizeof(V_CELL));
         memset(TEMP_SENSE, 0, sizeof(TEMP_SENSE));
         } 
-} BMS_ROSPackage[BMU_NUM] ; 
+} BMS_ROSPackage[BMU_NUM]; 
 // Basic OBC Data // Also
 uint8_t OBCVolt = 0;
 uint8_t OBCAmp = 0;
@@ -135,15 +141,24 @@ byte  VmaxCell ,VminCell ,TempMaxCell ,dVmax;
 /*--------------------------------------------------------------------------------------------*/
 
 /*******************************************************************
-  Setup Program
+  Setup, and Callback Program
 ********************************************************************/
+
+// void IRAM_ATTR onTimer() {
+//   noInterrupts();  // Protect shared variables from race condition
+
+//   /* Code here */
+
+
+//   interrupts();  // End critical section
+// }
 
 void setup() {
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); //disable brownout detector
   Serial.begin(115200);
+  
   /* Shutdown System setup */
   pinMode(SDCIN,INPUT_PULLDOWN); 
-  // pinMode(SDCIN,INPUT_PULLUP); // edit this thing out when real use 
   pinMode(OBCIN,INPUT_PULLDOWN);
   pinMode(BMSOUT,OUTPUT);
   // In case of specific troubleshooting
@@ -171,7 +186,26 @@ void setup() {
     EEPROM.get(2,TempMaxCell); Serial.println(TempMaxCell);
     EEPROM.get(3,dVmax); Serial.println(dVmax);
     
-    
+    //  Timer interrupt (From Hal) for tasks
+
+    // // Setup timer for 100ms intervals
+    //   My_timer1 =  timerBegin(0, 80, true);  // Timer with prescaler
+    //   timerAttachInterrupt(My_timer1, onTimer, true);
+    //   timerAlarmWrite(My_timer1, 100000, true);  // 100ms interval
+    //   timerAlarmEnable(My_timer1);
+
+    //   // Setup timer for 500ms intervals 
+    //   My_timer2 = timerBegin(0, 80, true);
+    //   timerAttachInterrupt(My_timer2, onTimer, true);
+    //   timerAlarmWrite(My_timer2, 500000, true);  // 500ms interval
+    //   timerAlarmEnable(My_timer2);
+
+    // Ticker for debugging Set all the Ticker for debugging via serial monitor
+      ticker1.attach_ms( (SYNC_TIME) , debugBMUmsg, 0);
+      ticker2.attach_ms( (SYNC_TIME * 5) ,debugBMUmsg , 0); 
+      ticker3.attach_ms( (OBC_SYNC_TIME) , debugOBCmsg);
+      ticker4.attach_ms( (SYNC_TIME) , debugSDC);
+      
   /* CAN Communication Setup */
     CAN.setPins(DEFAULT_CAN_RX_PIN,DEFAULT_CAN_TX_PIN);
     // CAN.filterExtended(0b00001100111011010000000000000101 , 0b11110000111111110000000011111111);
@@ -185,15 +219,14 @@ void setup() {
 }
 
 /*******************************************************************
-  Routine Program
+  Mainloop Program
 ********************************************************************/
 
 void loop(){
 
-  /*---------------------------------------------Check Fault , Shutdown*/ 
+  /*==================================================== Task 1 : Check Fault, Shutdown*/ 
     // //  Read SHUTDOWN_OK_SIGNAL signal according to the actual physical voltage of SDC
     // (digitalRead(SDCIN)) ? (SDCstat.SHUTDOWN_OK_SIGNAL = 1) : (SDCstat.SHUTDOWN_OK_SIGNAL = 0);
-
     // Read IMD_Ok and BSPD_OK status from shutdown circuit
     (digitalRead(IMDIN)) ? (IMD_OK = 1) : (IMD_OK = 0);
     (digitalRead(BSPDIN)) ? (BSPD_OK = 1) : (BSPD_OK = 0);
@@ -205,8 +238,9 @@ void loop(){
     // case 0 : communication timeout, via wiring or protocol error , lock MCU in this condition loop
     if( CAN_TIMEOUT_FLAG ) {
       // Reset the entired structure
-      // for(short i =0 ; i <BMU_NUM ; i++)
-      //   BMS_ROSPackage[i] = BMSdata(); 
+      for(short i =0 ; i <BMU_NUM ; i++)
+        BMS_ROSPackage[i] = BMSdata(); 
+      
       digitalWrite(BMSOUT,LOW);
       if( millis()-shutdown_timer1 >= SYNC_TIME*2){
         Serial.println("CANBUS_INACTIVE");
@@ -218,10 +252,10 @@ void loop(){
     else if ( !BMS_OK ) {
 
       digitalWrite(BMSOUT,LOW); 
-      if( millis()-shutdown_timer1 >= SYNC_TIME*2){
-        Serial.println("BMS_OK = 0");
-        shutdown_timer1 = millis();
-      }
+      // if( millis()-shutdown_timer1 >= SYNC_TIME*2){
+      //   Serial.println("BMS_OK = 0");
+      //   shutdown_timer1 = millis();
+      // }
     }
     // case 3 , Both BMS and SDC operate Normally , BMS output HIGH & SHUTDOWN_OK_SIGNAL read HIGH
     else if( (BMS_OK) && (SDC_OK_SIGNAL) ) {
@@ -234,15 +268,18 @@ void loop(){
     // May be this case isn't needed
     // case 3: Fault due to other system , BMS_OK HIGH , SHUTDOWN_OK_SIGNAL read LOW , IMD , and BSPD may read HIGH or low
     else {
-      // digitalWrite(BMSOUT,LOW); 
-      if( millis()-shutdown_timer1 >= SYNC_TIME*2){
-        Serial.println("SHUTDOWN DUE TO OTHER SYSTEM");
-        shutdown_timer1 = millis();
-      }
+      digitalWrite(BMSOUT,LOW); 
+
+    /* เมื่อกี้ ปิดตัวบนแล้วทำไม work  ต้องตรวจสอบดู*/
+
+      // if( millis()-shutdown_timer1 >= SYNC_TIME*2){
+      //   Serial.println("SHUTDOWN DUE TO OTHER SYSTEM");
+      //   shutdown_timer1 = millis();
+      // }
     }
     
 
-  /*--------------BMS_OK check-------------*/
+  /*==================================================== Task 2 : Fault Code Check */
     (OBCstatusbit > 0) ? (BMS_OK = 0): (BMS_OK = 1);
     // Faulting Matrix , looping to check : (May need to improve to a more time efficient method)
   
@@ -265,17 +302,54 @@ void loop(){
                     BMS_ROSPackage[3].BMU_FAULTY | BMS_ROSPackage[4].BMU_FAULTY | BMS_ROSPackage[5].BMU_FAULTY |
                     BMS_ROSPackage[6].BMU_FAULTY | BMS_ROSPackage[7].BMU_FAULTY;
     (FAULTCHECKSUM > 0) ? (BMS_OK = 0) : (BMS_OK = 1);
-
     // Dealing with warning flag
-    // Dealing with OVERDIV VOLTAGE
-    // DIV voltage During Driving --
-      //WARNING
-      //CRITICAL
-      // Do nothing
-    // DIV voltage during charging --
-      //WARNING
-      //CRITICAL
 
+    // Balancing while discharging?
+
+    /*------- Charging Shutdown specific routine------------*/
+    
+    // That will just be a two loop check
+ 
+    // OVER_DIV_VOLTAGE during charging --
+      // Full condition , check for Module 1- Module BMU_NUM ,, using simple bit shift operation
+      // 1. Chop up BMU operation status bit to 8, takes 4
+      // bool *bitarrayholder = nullptr;
+      
+      // for(short i =0 ; i <BMU_NUM; i++){
+      //   BMS_ROSPackage;
+      //   toBitarrayMSB(BMS_ROSPackage[i].);
+        
+
+      //   // now the case that VmaxCell >= VmaxCell * 0.9
+      // }
+
+      // 4.1 Charging Ready , if so Activiate charger
+
+      // 4.2 Low Voltage warning , if so turn on BMS low Voltage warning LED light
+      // 4.3 Voltage Full (Over Voltage warning) , if so turn on the 
+
+
+      // Extra** (Not in the operation status, but) OverVoltage critical , shutdown , and also turn off the charger
+      // for(short i =0 ; i <BMU_NUM; i++){
+
+      //   if(BMS_ROSPackage[i].BMUOperationStatus < VmaxCell *0.9);
+      //     break;
+        
+
+      //   // now the case that VmaxCell >= VmaxCell * 0.9
+      // }
+      
+
+      // BMS_ROSPackage[0].OVERDIV_VOLTAGE_WARNING; // >0.9*Vmax
+      // BMS_ROSPackage[0].OVERDIV_VOLTAGE_CRITICAL; // >= 0.95 Vmax
+      // // Analyze which cell is in the state of warning or critical state
+      // //case 1 : WARNING => Trigger balance discharge on each specific
+      // //case 2 : CRITICAL => Trigger the same mechanism , plus add extra command , to OBC to stop charging operation
+      bool OVERDIV_cmd = 0;
+      // // Use  to Balance_DischargeNum to debug for which cells should be displayed as warning or critical
+      // BMS_ROSPackage[0].BalancingDischarge_Cells;
+
+  /*==================================================== Task 3 : Fault Code Check*/
   /*------------------------------------------Message Transmission Routine*/ 
 
     // BCU CMD & SYNC   (100ms cycle Broadcast to all BMU modules in Bus) 
@@ -285,8 +359,8 @@ void loop(){
       reference_time = millis();
     }
     // BCU => OBC       (500ms cycle) , only when CHARGING_FLAG = TRUE
-    if( millis()-reference_time2 >= OBC_SYNC_TIME && CHARGING_FLAG ) {
-      BCUtoOBC_cmd_messagePrep(&sendmsg,);
+    if(millis()-reference_time2 >= OBC_SYNC_TIME && CHARGING_FLAG ) {
+      BCUtoOBC_cmd_messagePrep(&sendmsg, OVERDIV_cmd );
       CANsend(&sendmsg);
       reference_time2 = millis();
     }
@@ -303,13 +377,14 @@ void loop(){
     // for(short i = 0 ; i < receivemsg.can_dlc  ; i++) {
     //   Serial.print(receivemsg.data[i] , HEX);
     // } Serial.println();
+
     // checkModuleTimeout();
     // how to check if individual module timeout, check only for the src address part , if none received within Timeout = 4s
     // then that module isn't on the bus (due to CAN error , or its own error) (But this system is built to not having fault)
 
     // Pack data in BMS_ROSPackage => 
     // ----Driving
-    BCUmonitorBMU(&receivemsg); // 200ms cycle & 1000ms cycle of faultcode
+    // BCUmonitorBMU(&receivemsg); // 200ms cycle & 1000ms cycle of faultcode
     // ----Charging
     if(CHARGING_FLAG)
       BCUmonitorOBC(&receivemsg); // 500ms cycle
@@ -317,7 +392,6 @@ void loop(){
     // Update timeout flag and communication_timer
     CAN_TIMEOUT_FLAG = false;
     communication_timer1 = millis();
-
   } 
   // If receiving 0 bytes from CAN Bus check communication_timer >= TIMEOUT_TIME
   else if (millis()-communication_timer1 >= TIMEOUT_TIME){
@@ -368,6 +442,7 @@ void BCUmonitorBMU ( _can_frame* BCUreceived) {
   if(decodedCANID.BASE_ID != 0x0E && decodedCANID.DEST != 0xE5)
     return;
   
+  // Distingush Src Address
   byte i;
   switch (decodedCANID.SRC)
   {
@@ -404,7 +479,6 @@ void BCUmonitorBMU ( _can_frame* BCUreceived) {
 
       case 2:
         // Low series Side Cell C1-C7
-        // 2 loop or ?? this isn't good O(n^2)
         for(short j=0; j< 8; j++)
           BMS_ROSPackage[i].V_CELL[j] = BCUreceived->data[i]*0.02;
 
@@ -456,7 +530,7 @@ void checkModuleTimeout(){
 }
 
 // also for the case of Diff Voltage, the div voltage should not trigger The OK condition
-void BCUtoOBC_cmd_messagePrep ( _can_frame* BCUsent, bool cmd ) {
+void BCUtoOBC_cmd_messagePrep ( _can_frame* BCUsent, bool OVERDIV_CRIT_cmd ) {
 
   /* Set up BMS CAN frame*/
   BCUsent->can_id  = 0x1806E5F4; // refers to specification sheet
@@ -466,8 +540,8 @@ void BCUtoOBC_cmd_messagePrep ( _can_frame* BCUsent, bool cmd ) {
   BCUsent->data[6] = 0x00;
   BCUsent->data[7] = 0x00;
 
-  // Condition 1 iF BMS_OK Or manual cmd difference voltage commands,
-  if(BMS_OK || cmd) {
+  // Condition 1 iF BMS_OK OR Manual cmd DivVoltage commands,
+  if(BMS_OK || OVERDIV_CRIT_cmd) {
     BCUsent->data[0] = 0x0C; // V highbyte 
     BCUsent->data[1] = 0x80; // V lowbyte 72.0 V fake data -> Range 69-72-74 V
     BCUsent->data[2] = 0x00; // A Highbyte
@@ -502,85 +576,101 @@ void BCUmonitorOBC ( _can_frame* BCUreceived ) {
 
 // Recording to local data logger
 
-void debugBMUmsg(){
+void debugBMUmsg(int Module){
 
-    // Serial.print("BMU Operation Status: "); Serial.println(BMUOperationStatus);
-    // Serial.print("Cell balancing discharge: "); Serial.println(BalancingDischarge_Cells);
-    // Serial.print("V_CELL C1-10: ");
-    // for(short i=0; i< CELL_NUM; i++){
-    //   Serial.print(V_CELL[i]); Serial.print("V.  ");
-    // } Serial.println();
-    // Serial.print("V_MODULE: "); Serial.print(V_MODULE); Serial.println("V.  ");
-    // Serial.print("AVG_CELL_VOLTAGE_DIFF: ") ; Serial.print(DV); Serial.println("V.  ");
+    Serial.print("BMU Operation Status: "); Serial.println(BMS_ROSPackage[Module].BMUOperationStatus);
+    Serial.print("Cell balancing discharge: "); Serial.println(BMS_ROSPackage[Module].BalancingDischarge_Cells);
+    Serial.print("V_CELL C1-10: ");
+    // can change to vector , for easy looping funcion
+    for(short i=0; i< CELL_NUM; i++){
+      Serial.print(BMS_ROSPackage[Module].V_CELL[i]); Serial.print("V.  ");
+    } Serial.println();
+    Serial.print("V_MODULE: "); Serial.print(BMS_ROSPackage[Module].V_MODULE); Serial.println("V.  ");
+    Serial.print("AVG_CELL_VOLTAGE_DIFF: ") ; Serial.print(BMS_ROSPackage[Module].DV); Serial.println("V.  ");
 
-    // Serial.print("TEMP_SENSOR T1-T2: ");
-    // for(short i=0; i< TEMP_SENSOR_NUM; i++){
-    //   Serial.print(TEMP_CELL[i]); Serial.print("C.  ");
-    // } Serial.println();
+    Serial.print("TEMP_SENSOR T1-T2: ");
+    for(short i=0; i< TEMP_SENSOR_NUM; i++){
+      Serial.print(BMS_ROSPackage[Module].TEMP_SENSE[i]); Serial.print("C.  ");
+    } Serial.println();
 
-    // Serial.println();
+    Serial.println();
 
 }
-void debugBMUFault(){
-  // if(!BMS_OK){
-  //   Serial.print("OVERVOLTAGE_CRITICAL_CELLS (C1-C10): ");
-  //   Serial.println(OVERVOLTAGE_CRITICAL,HEX);
-  //   Serial.print("UNDERVOLTAGE_CRITICAL_CELLS (C1-C10): ");
-  //   Serial.println(LOWVOLTAGE_CRITICAL,HEX);
-  //   Serial.print("OVERTEMP_CRITICAL (C1-C10): ");
-  //   Serial.println(OVERTEMP_CRITICAL, HEX);
-  //   Serial.print("OVERDIV_CRITICAL (C1-C10): ");
-  //   Serial.println(OVERDIV_VOLTAGE_CRITICAL,HEX);
-  //   Serial.println();
-  // } else {
+void debugBMUFault(int Module){
+  if(!BMS_OK){
+    Serial.print("OVERVOLTAGE_CRITICAL_CELLS (C1-C10): ");
+    Serial.println(BMS_ROSPackage[Module].OVERVOLTAGE_CRITICAL,HEX);
+    Serial.print("UNDERVOLTAGE_CRITICAL_CELLS (C1-C10): ");
+    Serial.println(BMS_ROSPackage[Module].LOWVOLTAGE_CRITICAL,HEX);
+    Serial.print("OVERTEMP_CRITICAL (C1-C10): ");
+    Serial.println(BMS_ROSPackage[Module].OVERTEMP_CRITICAL, HEX);
+    Serial.print("OVERDIV_CRITICAL (C1-C10): ");
+    Serial.println(BMS_ROSPackage[Module].OVERDIV_VOLTAGE_CRITICAL,HEX);
+    Serial.println();
+  } else {
     
-  // }
-    // Serial.print("OVERVOLTAGE_WARNING_CELLS (C1-C10): ");
-    // Serial.println(OVERVOLTAGE_WARNING,HEX);
-    // Serial.print("UNDERVOLTAGE_WARNING_CELLS (C1-C10): ");
-    // Serial.println(LOWVOLTAGE_WARNING,HEX);
-    // Serial.print("OVERTEMP_WARNING (C1-C10): ");
-    // Serial.println(OVERTEMP_WARNING, HEX);
-    // Serial.print("OVERDIV_WARNING (C1-C10): ");
-    // Serial.println(OVERDIV_VOLTAGE_WARNING,HEX);
-    // Serial.println();  
+  }
+    Serial.print("OVERVOLTAGE_WARNING_CELLS (C1-C10): ");
+    Serial.println(BMS_ROSPackage[Module].OVERVOLTAGE_WARNING,HEX);
+    Serial.print("UNDERVOLTAGE_WARNING_CELLS (C1-C10): ");
+    Serial.println(BMS_ROSPackage[Module].LOWVOLTAGE_WARNING,HEX);
+    Serial.print("OVERTEMP_WARNING (C1-C10): ");
+    Serial.println(BMS_ROSPackage[Module].OVERTEMP_WARNING, HEX);
+    Serial.print("OVERDIV_WARNING (C1-C10): ");
+    Serial.println(BMS_ROSPackage[Module].OVERDIV_VOLTAGE_WARNING,HEX);
+    Serial.println();  
     
 }
 
 void debugOBCmsg(){
     
-    // Serial.print("Voltage from OBC: "); Serial.print(OBCVolt); Serial.println("V");
-    // Serial.print("Current from OBC: "); Serial.print(OBCAmp); Serial.println("A");
-    // Serial.print("OBC status bit"); Serial.println(OBCstatusbit);
+    Serial.print("Voltage from OBC: "); Serial.print(OBCVolt); Serial.println("V");
+    Serial.print("Current from OBC: "); Serial.print(OBCAmp); Serial.println("A");
+    Serial.print("OBC status bit"); Serial.println(OBCstatusbit);
 
-    // // Intepret Individual bit meaning
-    // bool *obcstatbitarray =  toBitarrayLSB(OBCstatusbit); // Status Byte
+    // Intepret Individual bit meaning
+    bool *obcstatbitarray =  toBitarrayLSB(OBCstatusbit); // Status Byte
     
-    // Serial.print("OBC status bit: ");
-    // switch (obcstatbitarray[0]) {
-    //   case 1:
-    //     Serial.println("ChargerHW = Faulty");
-    //     break;
-    // }
-    // switch (obcstatbitarray[1]) {
-    //   case 1:
-    //     Serial.println("ChargerTemp = Overheat");
-    //     break;
-    // }
-    // switch (obcstatbitarray[2]) {
-    //   case 1:
-    //     Serial.println("ChargerACplug = Reversed");
-    //     break;
-    // }
-    // switch (obcstatbitarray[3]) {
-    //   case 1:
-    //     Serial.println("Charger detects: NO BATTERY VOLTAGES");
-    //     break;
-    // }
-    // switch (obcstatbitarray[4]) {
-    //   case 1:
-    //     Serial.println("OBC Detect COMMUNICATION Time out: (6s)");
-    //     break;
-    // } 
+    Serial.print("OBC status bit: ");
+    switch (obcstatbitarray[0]) {
+      case 1:
+        Serial.println("ChargerHW = Faulty");
+        break;
+    }
+    switch (obcstatbitarray[1]) {
+      case 1:
+        Serial.println("ChargerTemp = Overheat");
+        break;
+    }
+    switch (obcstatbitarray[2]) {
+      case 1:
+        Serial.println("ChargerACplug = Reversed");
+        break;
+    }
+    switch (obcstatbitarray[3]) {
+      case 1:
+        Serial.println("Charger detects: NO BATTERY VOLTAGES");
+        break;
+    }
+    switch (obcstatbitarray[4]) {
+      case 1:
+        Serial.println("OBC Detect COMMUNICATION Time out: (6s)");
+        break;
+    } 
+}
+
+
+void debugSDC(){
+
+  if(!SDCstat.SHUTDOWN_OK_SIGNAL)
+    Serial.println("SDC_OK_SiGNAL: OFF");
+  if(!SDCstat.BMS_OK)
+    Serial.println("BMS_OK = 0");
+  if(!SDCstat.IMD_OK)
+    Serial.println("IMD_OK = 0");
+  if(!SDCstat.BSPD_OK)
+    Serial.println("BSPD_OK = 0");
+
+  
 }
 // Yuil sketch function to publish ROS topics

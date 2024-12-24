@@ -121,9 +121,18 @@ void run_command(uint32_t cmd);
 
 
 void packCANData(bool sync, bool timeOut, bool charging, bool balanceActive, bool voltFull, uint16_t balanceStatus, float vbatt, float deltaV, float temp1, float temp2);
-void packCANData2(int cell, float voltage, float temp);
-void sendCANFrame();
+void packCANData2(float temp);
+void packCANFrame45(float cellVoltage, float temp, int e);
+void send1CANFrame();
+void sendCANFrame3();
+void sendCANFrame45();
 void debugFrame1();
+void debugFault(int byte);
+void readCAN();
+// void select_MCP2515();
+// void deselect_MCP2515();
+// void select_LTC6811();
+// void deselect_LTC6811();
 /*******************************************************************
   Setup Variables
   The following variables can be modified to configure the software.
@@ -134,10 +143,27 @@ const uint8_t CELL_PER_IC = 12;
 //variable for packCANData
 bool timeOut = 1;
 bool sync = 1;
-bool charging = 0;
-bool balanceActive = 0;
-bool voltFull = 0;
-float vbatt,deltaV,temp1,temp2;
+bool charging = 1;
+bool balanceActive = 1;
+bool voltFull = 1;
+float temp1,temp2;
+float vbatt;
+
+// SPI CS Pin definitions
+
+
+int slot = 0;
+int state = 1;
+float avrBatt;
+float deltaV;
+ 
+unsigned long current = 0;
+unsigned long previousMill = 0;
+unsigned long actual;
+const long interval = 200;
+
+// int int= 0;
+
 uint16_t balanceStatus;
 
 // uint8_t dataF[8]; // payload for CANN
@@ -145,6 +171,10 @@ uint16_t balanceStatus;
 uint8_t fault;
 can_frame frame;
 can_frame frame2;
+can_frame frame3;
+can_frame frame4;
+can_frame frame5;
+can_frame readFrame;
 
 // ADC Command Configurations. See LTC681x.h for options.
 const uint8_t ADC_OPT = ADC_OPT_DISABLED;         //!< ADC Mode option bit
@@ -202,22 +232,39 @@ bool DCTOBITS[4] = {true, false, true, false};                                  
 // MCP_CAN CANN(spiCSPin);
 float cellVoltage;
 float cell_voltage[TOTAL_IC][CELL_PER_IC];
-// int sync, 
 
+// int sync, 
 // Initialize the MCP_CAN object
+const int LTC6811_CS_PIN = 9;
 MCP2515 mcp2515(10);
 
 void setup()
 {
+    // Set CS pins as outputs
+  pinMode(LTC6811_CS_PIN, OUTPUT);
+
+  // Set both CS pins HIGH initially
+  digitalWrite(LTC6811_CS_PIN, LOW);
+
+
+
   wakeup_sleep(TOTAL_IC);
   LTC6811_wrcfg(TOTAL_IC, BMS_IC);
-  frame.can_id  = 0x0F6;
+  frame.can_id  = 0x11E;
   frame.can_dlc = 8;
 
   frame2.can_id  = 0x0F6;
   frame2.can_dlc = 8;
  
-  
+  frame3.can_id  = 0x0F6;
+  frame3.can_dlc = 8;
+
+  frame4.can_id  = 0x0F7;
+  frame4.can_dlc = 8;
+
+  frame5.can_id  = 0x0F8;
+  frame5.can_dlc = 8;
+
   while (!Serial);
   Serial.begin(115200);
   
@@ -229,7 +276,7 @@ void setup()
 
   // Initialize frames
   
-  quikeval_SPI_connect();
+  // quikeval_SPI_connect();
   spi_enable(SPI_CLOCK_DIV16); // This will set the Linduino to have a 1MHz Clock
   LTC6811_init_cfg(TOTAL_IC, BMS_IC);
   for (uint8_t current_ic = 0; current_ic < TOTAL_IC; current_ic++)
@@ -238,8 +285,8 @@ void setup()
   }
   LTC6811_reset_crc_count(TOTAL_IC, BMS_IC);
   LTC6811_init_reg_limits(TOTAL_IC, BMS_IC);
-  print_menu();
-}
+  // print_menu();
+}  
 
 /*!*********************************************************************
  \brief Main loop
@@ -251,8 +298,15 @@ void loop()
   // mcp2515.sendMessage(&frame);
   // mcp2515.sendMessage(&frame2);
   
-  delay(1000);
-  measurement_loop(DATALOG_DISABLED, timeOut, sync, charging, balanceActive, voltFull);
+  // delay(1000);
+  current = millis();
+  readCAN();
+  // if(current - previousMill){
+
+  // }
+  // Serial.print("Time : ")
+  // Serial.println(current);
+  measurement_loop(DATALOG_ENABLED, timeOut, sync, charging, balanceActive, voltFull);
   // if (Serial.available()) // Check for user input
   // {
   //   uint32_t user_command;
@@ -374,7 +428,7 @@ void run_command(uint32_t cmd)
   case 11: // Loop Measurements of configuration register or cell voltages or auxiliary register or status register without data-log output
     wakeup_sleep(TOTAL_IC);
     LTC6811_wrcfg(TOTAL_IC, BMS_IC);
-    // measurement_loop(DATALOG_DISABLED, timeOut,sync,charging,balanceActive,voltFull);
+    measurement_loop(DATALOG_ENABLED, timeOut,sync,charging,balanceActive,voltFull);
     print_menu();
     break;
 
@@ -508,7 +562,7 @@ void run_command(uint32_t cmd)
     check_error(error);
     print_rxconfig();
     break;
-
+  
   case 24: // Clear all discharge transistors
     wakeup_sleep(TOTAL_IC);
     LTC6811_clear_discharge(TOTAL_IC, BMS_IC);
@@ -711,37 +765,39 @@ void run_command(uint32_t cmd)
   }
 }
 
-int slot = 0;
-int state = 0;
 /*!**********************************************************************************************************************************************
  \brief For writing/reading configuration data or measuring cell voltages or reading aux register or reading status register in a continuous loop
  @return void
 *************************************************************************************************************************************************/
+// int ic;
+// float difV ;
 void measurement_loop(uint8_t datalog_en, int timeOut, int sync, int charging, int balanceActive, int voltFull)
 {
-  float temp = 25.0;
+  
+  float temp = 60.0;
   int8_t error = 0;
   // char input = 0;
 
-  Serial.println(F("Transmit 'm' to quit"));
+  // Serial.println(F("Transmit 'm' to quit"));
 
-    if (WRITE_CONFIG == ENABLED)
-    {
-      wakeup_sleep(TOTAL_IC);
-      LTC6811_wrcfg(TOTAL_IC, BMS_IC);
-      print_wrconfig();
-    }
+    // if (WRITE_CONFIG == ENABLED)
+    // {
+    //   wakeup_sleep(TOTAL_IC);
+    //   LTC6811_wrcfg(TOTAL_IC, BMS_IC);
+    //   print_wrconfig();
+    // }
 
-    if (READ_CONFIG == ENABLED)
-    {
-      wakeup_sleep(TOTAL_IC);
-      error = LTC6811_rdcfg(TOTAL_IC, BMS_IC);
-      check_error(error);
-      print_rxconfig();
-    }
+    // if (READ_CONFIG == ENABLED)
+    // {
+    //   wakeup_sleep(TOTAL_IC);
+    //   error = LTC6811_rdcfg(TOTAL_IC, BMS_IC);
+    //   check_error(error);
+    //   print_rxconfig();
+    // }
 
     if (MEASURE_CELL == ENABLED)
     {
+      // select_LTC6811();
       wakeup_idle(TOTAL_IC);
       LTC6811_adcv(ADC_CONVERSION_MODE, ADC_DCP, CELL_CH_TO_CONVERT);
       LTC6811_pollAdc();
@@ -749,138 +805,158 @@ void measurement_loop(uint8_t datalog_en, int timeOut, int sync, int charging, i
       error = LTC6811_rdcv(SEL_ALL_REG, TOTAL_IC, BMS_IC);
       check_error(error);
       print_cells(datalog_en);
-      
-      float vbatt=0;
-      
-      for (int ic = 0; ic < TOTAL_IC; ic++)
-      {
-        Serial.print("IC: ");
-        Serial.println(ic + 1);
+      // deselect_LTC6811();
+
         // float omg = 100;
         // Serial.println(sumVoltScale);
-        int count = 0;
-        for (int cell = 0; cell < 16; cell++)
-        {
+        // state = 2;
+
+        // int count = 0;
+        
+          // if(temp1 >= 70 || temp2 >= 70){
+          //   Serial.println("OverTemp!!");
+          // } 
+          // else {
+          //   Serial.println("normal temp");
+          // }
           
-          float cellVoltage = BMS_IC[ic].cells.c_codes[cell]*0.0001;
-          vbatt = vbatt + cellVoltage;
-          count = count + 1;
-          // Serial.print("count: ");
-          // Serial.println(count);
-          // Serial.print("Sum : ");
-          // Serial.println(sumVolt);
-          // Determine fault based on voltage
-          if (cell + 1 <= 10)
-          {
-            if (cellVoltage > 4.2)
-            {
-              fault = 2; // Overvoltage
-              // Serial.print("Fault: Overvoltage ");
-            }
-            else if (cellVoltage < 3.0)
-            {
-              fault = 4; // Undervoltage
-              // Serial.print("Fault: Undervoltage ");
-            }
-            else if ((cellVoltage > 4.1 && cellVoltage < 4.2))
-            {
-              fault = 1;
-              // Serial.print("Fault: Warning Overvoltage ");
-            }
-            else if ((cellVoltage > 3.0 && cellVoltage < 3.2))
-            {
-              fault = 4;
-              // Serial.print("Fault: Warning Undervoltage ");
-            }
-            else
-            {
-              fault = 0; // No fault
-              // Serial.print("Fault: None ");
-            }
-          }
           // Serial.println(cell);
           // uint8_t voltageScaled = (uint8_t)(cellVoltage / 0.02);
           // Serial.println("This is message 2");
-          
-          // if(state == 1){
-          //   packCANData2(cell, cellVoltage, temp);
-
-          // }
-          // else if(state == 2){
-          //   packCANData(timeOut,sync,charging,balanceActive,voltFull,sumVoltScale);
-
-          // }
-        }
-        // byte sumVoltScale = (byte)(sumVolt/ 0.2);   
-        packCANData(sync,timeOut,charging,balanceActive,voltFull,balanceStatus,vbatt,deltaV,temp1,temp2);  
-        debugFrame1();
-
-
-        
-        // Serial.println("packCanDataF[]");
-        // for (int w = 0; w < 8; w++)
-        // {
-        //   Serial.print(frame.data[w]);
-        //   Serial.println("");
-        // }
-
-        // Serial.println("packCanDataF2[] ");
-        // for (int w = 0; w < 8; w++)
-        // {
-        //   Serial.print(frame2.data[w]);
-        //   Serial.println("");
-        // }
-        // Serial.print("sumVoltScale : ");
-        // Serial.println(sumVoltScale);
-        Serial.println();
-        sendCANFrame();
+      
+      avrBatt = 0;
+      vbatt = 0;
+      int count =0;
+      // clearing byte
+      for (int a = 0;a<6;a++){
+        frame4.data[a] = 0;
+        frame5.data[a] = 0;
+      }
+      for (int w =0; w<10;w++){
+        cellVoltage = BMS_IC[0].cells.c_codes[w] * 0.0001;
+        vbatt = vbatt + cellVoltage;
       }
 
+      avrBatt = vbatt / 10;
+      deltaV = 4.2 - avrBatt;   
+
+      for (int w =0; w<10;w++){
+        cellVoltage = BMS_IC[0].cells.c_codes[w] * 0.0001;
+        // packCANFrame45(cellVoltage,temp,w);
+      }
+      // for (int u = 0;u<8;u++){
+      //   debugFault(count);
+      //   count++;
+      // }
+      // sendCANFrame45();
+      // deltaV = 0;
+      // Serial.print("avrBatt: ");
+      // Serial.println(avrBatt);
+      // Serial.print("difV : ");
+      // Serial.print("State : ");
+      // Serial.println(state);
+      if(current-previousMill >= interval){
+        packCANData(sync,timeOut,charging,balanceActive,voltFull,balanceStatus,vbatt,deltaV,temp1,temp2);
+        debugFrame1();
+        packCANData2(temp);
+        previousMill = current;
+        actual = current - previousMill;
+        sendCANFrame3();
+        Serial.print("Time : ");Serial.println(actual);
+      }
+
+      Serial.println("Frame 2 data:");
+      for (int w = 0; w < 8; w++) {
+          Serial.print("Byte ");
+          Serial.print(w);
+          Serial.print(": ");
+          Serial.println(frame2.data[w], HEX);  // Print in hexadecimal for better readability
+      }
+
+      Serial.println("Frame 3 data:");
+      for (int w = 0; w < 8; w++) {
+          Serial.print("Byte ");
+          Serial.print(w);
+          Serial.print(": ");
+          Serial.println(frame3.data[w], HEX);
+      }
+      
+     
+      // actual = current - previousMill;    
+      // previousMill = current;
+
+      // if(current - previousMill >= interval){
+        
+      // }
+      // Serial.print("interval : "); Serial.println(actual);
+      
+      
+      // Serial.print("State : ");
+      // Serial.println(state)
+      // if(current - previousMill >= interval){
+      //   actual = current - previousMill;
+      //   previousMill = current;
+      // }
+    
+    
+    
+      // state = 2;
+    
+    // Serial.println(difV);
+
+    
+
+    // Serial.print("sumVoltScale : ");
+    // Serial.println(sumVoltScale);
+    // Serial.println();
+       
+      
+
   
     }
 
-    if (MEASURE_AUX == ENABLED)
-    {
-      wakeup_idle(TOTAL_IC);
-      LTC6811_adax(ADC_CONVERSION_MODE, AUX_CH_ALL);
-      LTC6811_pollAdc();
-      wakeup_idle(TOTAL_IC);
-      error = LTC6811_rdaux(SEL_ALL_REG, TOTAL_IC, BMS_IC); // Set to read back all aux registers
-      check_error(error);
-      print_aux(datalog_en);
-    }
+    // if (MEASURE_AUX == ENABLED)
+    // {
+    //   wakeup_idle(TOTAL_IC);
+    //   LTC6811_adax(ADC_CONVERSION_MODE, AUX_CH_ALL);
+    //   LTC6811_pollAdc();
+    //   wakeup_idle(TOTAL_IC);
+    //   error = LTC6811_rdaux(SEL_ALL_REG, TOTAL_IC, BMS_IC); // Set to read back all aux registers
+    //   check_error(error);
+    //   print_aux(datalog_en);
+    // }
 
-    if (MEASURE_STAT == ENABLED)
-    {
-      wakeup_idle(TOTAL_IC);
-      LTC6811_adstat(ADC_CONVERSION_MODE, STAT_CH_ALL);
-      LTC6811_pollAdc();
-      wakeup_idle(TOTAL_IC);
-      error = LTC6811_rdstat(SEL_ALL_REG, TOTAL_IC, BMS_IC); // Set to read back all aux registers
-      check_error(error);
-      print_stat();
-    }
+    // if (MEASURE_STAT == ENABLED)
+    // {
+    //   wakeup_idle(TOTAL_IC);
+    //   LTC6811_adstat(ADC_CONVERSION_MODE, STAT_CH_ALL);
+    //   LTC6811_pollAdc();
+    //   wakeup_idle(TOTAL_IC);
+    //   error = LTC6811_rdstat(SEL_ALL_REG, TOTAL_IC, BMS_IC); // Set to read back all aux registers
+    //   check_error(error);
+    //   print_stat();
+    // }
 
-    if (PRINT_PEC == ENABLED)
-    {
-      print_pec_error_count();
-    }
+    // if (PRINT_PEC == ENABLED)
+    // {
+    //   print_pec_error_count();
+    // }
 
-    delay(MEASUREMENT_LOOP_TIME);
+    // delay(MEASUREMENT_LOOP_TIME);0000000000000000000000000000000000000000000000000000000000000000000000000000000000000
   
 }
+
 void packCANData(bool sync, bool timeOut, bool charging, bool balanceActive, bool voltFull, 
                   uint16_t balanceStatus, float vbatt, float deltaV, float temp1, float temp2) {
-    
     // Byte 0 - Status flags
     frame.data[0] = 0; // Clear all bits first
-    if(sync) frame.data[0] |= (1<<1);
-    if(timeOut) frame.data[0] |= (1<<2);
-    if(charging) frame.data[0] |= (1<<3);
-    if(balanceActive) frame.data[0] |= (1<<4);
-    if(voltFull) frame.data[0] |= (1<<5);
+    if(sync) frame.data[0] |= (1<<0);
+    if(timeOut) frame.data[0] |= (1<<1);
+    if(charging) frame.data[0] |= (1<<2);
+    if(balanceActive) frame.data[0] |= (1<<3);
+    if(voltFull) frame.data[0] |= (1<<4);
     
-    // Byte 1-2 - Balance cell status (10-bit representation)
+    // Byte 1-2 - Balance cell sta.tus (10-bit representation)
     frame.data[1] = (balanceStatus >> 8) & 0xFF;  // High byte
     frame.data[2] = balanceStatus & 0xFF;         // Low byte
     
@@ -902,60 +978,178 @@ void packCANData(bool sync, bool timeOut, bool charging, bool balanceActive, boo
     
     // Byte 7 - Reserved (for SOC/SOH)
     frame.data[7] = 0;  // Currently unused
+
+    state = 2;
 }
 
-void packCANData2(int cell, float voltage, float temp) {
+void packCANData2(float temp) {
   // Scale voltage (assuming conversion needed)
   // Serial.print("this is message 2");
-  byte voltageScaled = (byte)(voltage / 0.02);
-  // Frame 1 (first 8 cells)
-  if (cell + 1 <= 8) {
-    frame.data[cell] = voltageScaled;
+  for(int cell = 0;cell<10;cell++){
+    cellVoltage = BMS_IC[0].cells.c_codes[cell] * 0.0001;
+    // Serial.print("cell volt : ");
+    // Serial.println(cellVoltage);
+    byte voltageScaled = (byte)(cellVoltage / 0.02);
+    // Frame 1 (first 8 cells)
+    if (cell + 1 <= 8) {
+      frame2.data[cell] = voltageScaled;
+    }
+    if (cell+1 >= 9 && cell + 1 <= 10) {
+      frame3.data[cell-8] = voltageScaled;
+    }
+
+    for (int i = 2; i < 8; i++) {
+      frame3.data[i] = 0;
+    }
+    state = 1;
+
   }
-  if (cell+1 >= 9 && cell + 1 <= 10) {
-    frame2.data[cell-8] = voltageScaled;
-  }
-  if (cell + 1 >= 11 && cell+1 <= 16) {
-    frame2.data[cell-8] = 0;
-  }
-  state = 1;
-  // Frame 2 (remaining data)
-  // else if (cell + 1 == 9 || cell + 1 == 10) {
-  //   frame2.data[cell - 8] = voltageScaled;
-  // }
-  
-  // else if (cell + 1 >= 11 && cell + 1 <= 13) {
-  //   frame2.data[cell - 8] = (byte)(temp / 0.02);  // Temperature scaling
-  // }
-  
-  // else if (cell + 1 == 14) {
-  //   frame2.data[cell - 8] = 2; // current
-  // }
-  
-  // else if (cell + 1 >= 15 && cell + 1 <= 16) {
-  //   frame2.data[cell - 8] = 0xF;
-  // }
-  
-  // Serial.print("packCanDataF2[]");
-  // for (int w = 0; w < 8; w++)
-  // {
-  //   Serial.print(frame2.data[w]);
-  //   Serial.println("");
-  // }
+
 }
 
-void sendCANFrame(){
-  Serial.println("sent");
+// void send1CANFrame(){
+//   Serial.println("sent");
+//   mcp2515.sendMessage(&frame);
+  
+// }
+// void send2CANFrame(){
+//   Serial.println("sent");
+//   mcp2515.sendMessage(&frame);
+//   mcp2515.sendMessage(&frame2);
+ 
+// }
+
+void packCANFrame45(float cellVoltage, float temp,  int e){
+  float maxVolt = 4.2;
+  float minVolt = 3.2;
+  // for(int c = 0;c<7;c++){
+  //   frame4.data[c] = 0;
+  // }
+    // Serial.println(deltaV);
+
+  // first byte
+    if(cellVoltage >= 0.95 * maxVolt){ // for OverVoltage Warning
+      if(e<8){
+        frame4.data[0] |= (1<<(7-e));
+      }
+      else{
+        frame4.data[1] |= (1<<(15-e));
+      }
+    }
+
+    //second byte
+    if(cellVoltage > maxVolt){ // for OverVoltage Critical
+      if(e<8){
+        frame4.data[2] |= (1<<(7-e));
+      }
+      else{
+        frame4.data[3] |= (1<<(15-e));
+      }
+    }
+
+    //thirdw byte
+    if(cellVoltage <= 1.12 * minVolt){ //for Low Voltage warning 
+      if(e<8){
+        frame4.data[4] |= (1<<(7-e));
+      }
+      else{
+        frame4.data[5] |= (1<<(15-e));
+      }
+    }
+
+
+    if(cellVoltage <= 1.1 * minVolt){ //for Low Voltage critical
+      if(e<8){
+        frame4.data[6] |= (1<<(7-e));
+      }
+      else{
+        frame4.data[7] |= (1<<(15-e));
+      }
+    }
+
+    if(temp >= 0.8*60){//over temp warning
+      if(e<8){
+        frame5.data[0] |= (1<<(7-e));
+      }
+      else{
+        frame5.data[1] |= (1<<(15-e));
+      }
+    }
+
+    if(temp >= 0.9*60){//overtemp critical
+      if(e<8){
+        frame5.data[2] |= (1<<(7-e));
+      }
+      else{
+        frame5.data[3] |= (1<<(15-e));
+      }
+    }
+
+    if(deltaV >= 0.18){ //Over Div Voltage Warning
+      if(e<8){
+        frame5.data[4] |= (1<<(7-e));
+      }
+      else{
+        frame5.data[5] |= (1<<(15-e));
+      }
+    }
+
+    if(deltaV >= 0.2){//Over Div Voltage Critical
+      if(e<8){
+        frame5.data[6] |= (1<<(7-e));
+      }
+      else{
+        frame5.data[7] |= (1<<(15-e));
+      }
+    }
+  
+  // frame.data[0] = 0; // Clear all bits first
+  // if() frame.data[0] |= (1<<0);
+  // if(timeOut) frame.data[0] |= (1<<1);
+  // if(charging) frame.data[0] |= (1<<2);
+  // if(balanceActive) frame.data[0] |= (1<<3);
+  // if(voltFull) frame.data[1] |= (1<<4);
+  // if(voltFull) frame.data[1] |= (1<<5);
+  // if(voltFull) frame.data[1] |= (1<<6);
+  // if(voltFull) frame.data[1] |= (1<<7);
+  // if(voltFull) frame.data[1] |= (1<<8);
+  // if(voltFull) frame.data[1] |= (1<<9);
+    
+}
+void debugFault(int byte){
+  Serial.print("byte :");Serial.println(byte);
+  for(int i = 7; i >= 0; i--) {
+// Print each bit (0 or 1)
+    Serial.print((frame5.data[byte] >> i) & 1);
+    Serial.print(" ");
+  }
+  Serial.println();
+  
+//   for(int i = 7; i >= 0; i--) {
+// // Print each bit (0 or 1)
+//     Serial.print((frame4.data[byte+1] >> i) & 1);
+//     Serial.print(" ");
+//   }
+  Serial.println();
+}
+void sendCANFrame3(){
   mcp2515.sendMessage(&frame);
   mcp2515.sendMessage(&frame2);
+  mcp2515.sendMessage(&frame3);
+}
+
+void sendCANFrame45(){
+  mcp2515.sendMessage(&frame4);
+  mcp2515.sendMessage(&frame5);
+
 }
 
 void debugFrame1() {
     Serial.println("Frame 1 Data:");
     // Status bits
-    Serial.print("Status (0b");
+    Serial.print("Status : (0b");
     for (int i = 7; i >= 0; i--) {
-        Serial.print((frame.data[0] >> i) & 0x01);
+        Serial.print((frame.data[0] >> i) & 1);
     }
     Serial.println(")");
     
@@ -974,10 +1168,39 @@ void debugFrame1() {
     float temp2 = 2.0 + (frame.data[6] * 0.0125);
     
     Serial.print("Vbatt: "); Serial.print(vbatt); Serial.println("V");
+    Serial.print("Volt average: "); Serial.print(avrBatt); Serial.println("V");
     Serial.print("Delta V: "); Serial.print(deltaV); Serial.println("V");
     Serial.print("Temp1 Vsense: "); Serial.print(temp1); Serial.println("V");
     Serial.print("Temp2 Vsense: "); Serial.print(temp2); Serial.println("V");
 }
+
+void readCAN(){
+    if (mcp2515.readMessage(&readFrame) == MCP2515::ERROR_OK) {
+    uint32_t received_id = frame.can_id & ~CAN_EFF_FLAG;
+    // Serial.print(readFrame.can_id, HEX); // print ID
+    // Serial.print(" "); 
+    // Serial.print(readFrame.can_dlc, HEX); // print DLC
+    // Serial.print(" ");
+    for (int i = 0; i<readFrame.can_dlc; i++)  {
+      
+      Serial.print(readFrame.data[i],HEX);
+
+      
+    }
+
+    Serial.println();      
+  }
+}
+
+// void select_LTC6811() {
+//     digitalWrite(LTC6811_CS_PIN, LOW);
+// }
+
+// void deselect_LTC6811() {
+//     digitalWrite(LTC6811_CS_PIN, HIGH);
+// }
+
+
 /*!*********************************
   \brief Prints the main menu
  @return void

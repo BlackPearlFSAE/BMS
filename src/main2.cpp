@@ -38,6 +38,8 @@ RTOS and Push ROS topics
 #define BSPDIN GPIO_NUM_4  // Check BSPD OK signal from BSPD directly 
 #define IMDIN GPIO_NUM_5   // Check IMD OK signal from IMD directly
 #define BMSOUT GPIO_NUM_47  // OUTPUT Fault Signal to BMS relay
+// #define BMSOUT LED_BUILTIN - SOC_GPIO_PIN_COUNT
+// #define BMSOUT LED_BUILTIN  // OUTPUT Fault Signal to BMS relay
 #define EEPROM_SIZE 5
 #define OBC_SYNC_TIME 500
 #define SYNC_TIME 200
@@ -50,103 +52,125 @@ RTOS and Push ROS topics
 #define CELL_NUM 16
 #define TEMP_SENSOR_NUM 2
 #define BMU_NUM 8
+#define OBC_ADD 0x1806E5F4
+#define BCU_ADD 0x01EE5000
+
+/**************** Setup Variables *******************/
+twai_message_t sendMessage;
+twai_message_t receivedMessage;
+
+// Software Timer reference
+unsigned long reference_time = 0; unsigned long reference_time2 = 0;
+unsigned long communication_timer1 = 0;
+unsigned long shutdown_timer1 = 0;
+// Ticker , Timer interrupt
+// Ticker ticker1; // Debugging BMU Cell msg
+// Ticker ticker2; // Debugging BMU Fault code msg
+// Ticker ticker3; // Debugging OBC Fault code msg
+// Ticker ticker4; // Debugging OBC Fault code msg
+hw_timer_t *My_timer1 = NULL;
+hw_timer_t *My_timer2 = NULL;
+
+// Data Aggregation , and Relay to Other Sub System , e.g. Telemetry , DataLogger, BMS GUI
+// Report BMS data, and Faulty status code // Serialize this data in 8 bit buffer
+
+/* Data send to Remote System */
+  // BMU data strcuture
+  struct BMSdata {
+    // Basic BMU Data
+    uint8_t V_CELL[CELL_NUM];
+    uint8_t TEMP_SENSE[TEMP_SENSOR_NUM];
+    uint8_t V_MODULE = 0;
+    uint8_t DV = 0;
+    // FaultCode 10 bit binary representation of C
+    uint16_t OVERVOLTAGE_WARNING = 0;
+    uint16_t OVERVOLTAGE_CRITICAL = 0;  
+    uint16_t LOWVOLTAGE_WARNING = 0;
+    uint16_t LOWVOLTAGE_CRITICAL = 0; 
+    uint16_t OVERTEMP_WARNING = 0;
+    uint16_t OVERTEMP_CRITICAL = 0;
+    uint16_t OVERDIV_VOLTAGE_WARNING = 0 ; // Trigger cell balancing of the cell at fault
+    uint16_t OVERDIV_VOLTAGE_CRITICAL = 0; // Trigger Charger disable in addition to Cell balancing
+    bool BMU_WARNING = 0;
+    bool BMU_FAULTY = 0;
+
+
+    bool BMUconnected = 1;   // Default as Active true , means each BMU is on the bus
+    
+    // Status
+    uint16_t BalancingDischarge_Cells = 0;
+    uint8_t BMUreadytoCharge = 0;
+    
+    // Reset call
+    BMSdata() {
+          memset(V_CELL, 0, sizeof(V_CELL));
+          memset(TEMP_SENSE, 0, sizeof(TEMP_SENSE));
+          } 
+  }; 
+
+  
+  // struct OBCdata {
+  //   uint8_t OBCVolt = 0;
+  //   uint8_t OBCAmp = 0;
+  //   uint8_t OBCstatusbit = 0 ;   // During Charging
+  // };
+  // Physical condition of OBC On board charger , charging power , and safety information
+  uint8_t OBCVolt = 0;
+  uint8_t OBCAmp = 0;
+  uint8_t OBCstatusbit = 0 ;   // During Charging
+
+  // Physical condition of SDC and LV Circuit, safety information , and relay it to Telemetry system
+  struct SDCstatus {
+    bool SHUTDOWN_OK_SIGNAL = 1; // AIR+
+    bool BMS_OK = 1; // AMS_OUT+ ,AMS_GND
+    bool IMD_OK = 1; // IMD_OUT
+    bool BSPD_OK = 1; // BSPD_OUT
+  };
+
+
+// ACCUMULATOR Data , Local to BCU (Make this a struct later , or not? , I don't want over access)
+bool  ACCUMULATOR_FULL;
+bool  ACCUMULATOR_LOW_VOLTAGE;
+float ACCUMULATOR_VOLTAGE = 0.0; 
+float ACCUM_MAXVOLTAGE = VMAX_CELL * CELL_NUM; // Expected
+float ACCUM_MINVOLTAGE = VMIN_CELL * CELL_NUM; // Expected
+
+// Default Parameter
+byte  VmaxCell ,VminCell ,TempMaxCell ,dVmax;
+
+// Flag
+const bool EEPROM_WRITE_FLAG = 0;
+
+bool ACCUM_OK = 1;
+bool ACCUM_CHG_READY_OK = 0;
+bool ACCUM_OVERDIV_OK = 0;
+bool CHARGER_PLUGGED = false; // (use basic digitalRead())
+bool CAN_TIMEOUT_FLG = false;
+bool OBC_OK = 1;
+volatile bool CAN_SEND_FLG1 = false;
+volatile bool CAN_SEND_FLG2 = false;
+
+
+BMSdata BMS_ROSPackage[BMU_NUM];
+SDCstatus SDCstat;
+// OBCdata OBC_ROSPackage;
+
 /**************** Local Function Delcaration *******************/
 
-void packOBCmsg ( twai_message_t *BCUsent , bool cmd);
-void packBMUmsg ( twai_message_t *BCUsent);
+void packBMUmsg ( twai_message_t *BCUsent, uint16_t Sync_time,  bool &is_charger_plugged);
+void packOBCmsg ( twai_message_t *BCUsent, bool &BMS_OK , bool &ReadytoCharge, bool &OverDivCritical_Yes, bool &Voltage_is_Full);
 void unpackOBCmsg ( twai_message_t *BCUreceived );
 void unpackBMUmsg ( twai_message_t *BCUreceived, BMSdata *BMS_ROSPackage);
 void debugBMUmsg(int Module);
 void debugBMUFault(int Module);
 void debugOBCmsg();
 void debugSDC();
+void checkModuleTimeout();
+void checkACCUMULATORvoltage ();
 
-
-/**************** Setup Variables *******************/
-
-
-twai_message_t sendMessage;
-twai_message_t receivedMessage;
-
-// struct _can_frame sendmsg;
-// struct _can_frame receivemsg;
-
-// Data Aggregation , and Relay to Other Sub System , e.g. Telemetry , DataLogger, BMS GUI
-// Report BMS data, and Faulty status code // Serialize this data in 8 bit buffer
-
-// BMU data strcuture
-struct BMSdata {
-  // Basic BMU Data
-  uint8_t V_CELL[CELL_NUM];
-  uint8_t TEMP_SENSE[TEMP_SENSOR_NUM];
-  uint8_t V_MODULE = 0;
-  uint8_t DV = 0;
-  // FaultCode 10 bit binary representation of C
-  uint16_t OVERVOLTAGE_WARNING = 0;
-  uint16_t OVERVOLTAGE_CRITICAL = 0;  
-  uint16_t LOWVOLTAGE_WARNING = 0;
-  uint16_t LOWVOLTAGE_CRITICAL = 0; 
-  uint16_t OVERTEMP_WARNING = 0;
-  uint16_t OVERTEMP_CRITICAL = 0;
-  uint16_t OVERDIV_VOLTAGE_WARNING = 0 ; // Trigger cell balancing of the cell at fault
-  uint16_t OVERDIV_VOLTAGE_CRITICAL = 0; // Trigger Charger disable in addition to Cell balancing
-  bool BMU_WARNING = 0;
-  bool BMU_FAULTY = 0;
-  bool BMUActive = 1;   // Default as Active true , means each BMU is on the bus
-  
-  // Status Binary Code
-  uint16_t BalancingDischarge_Cells =0 ;
-  uint8_t BMUOperationStatus = 0;
-  
-  // Reset call
-  BMSdata() {
-        memset(V_CELL, 0, sizeof(V_CELL));
-        memset(TEMP_SENSE, 0, sizeof(TEMP_SENSE));
-        } 
-} BMS_ROSPackage[BMU_NUM]; 
-
-// Physical condition of SDC and LV Circuit, safety information , and relay it to Telemetry system
-struct SDCstatus {
-  bool CAN_TIMEOUT = 0;
-  bool SHUTDOWN_OK_SIGNAL = 1; // AIR+
-  bool BMS_OK = 1; // AMS_OUT+ ,AMS_GND
-  bool IMD_OK = 1; // IMD_OUT
-  bool BSPD_OK = 1; // BSPD_OUT
-} SDCstat;
-
-// Physical condition of OBC On board charger , charging power , and safety information
-uint8_t OBCVolt = 0;
-uint8_t OBCAmp = 0;
-uint8_t OBCstatusbit = 0 ;   // During Charging
-
-// Software Timer reference
-unsigned long reference_time = 0;
-unsigned long reference_time2 = 0;
-unsigned long communication_timer1 = 0;
-unsigned long shutdown_timer1 = 0;
-// Ticker , Timer interrupt
-Ticker ticker1; // Debugging BMU Cell msg
-Ticker ticker2; // Debugging BMU Fault code msg
-Ticker ticker3; // Debugging OBC Fault code msg
-Ticker ticker4; // Debugging OBC Fault code msg
-hw_timer_t *My_timer1 = NULL;
-hw_timer_t *My_timer2 = NULL;
-
-// Flag
-const bool EEPROM_WRITE_FLAG =  false;
-bool &SDC_OK_SIGNAL = SDCstat.SHUTDOWN_OK_SIGNAL; 
-bool &BMS_OK = SDCstat.BMS_OK;
-bool &IMD_OK = SDCstat.IMD_OK; 
-bool &BSPD_OK = SDCstat.BSPD_OK; 
-bool CHARGING_FLAG = false; // (Will use Hardware Interrupt later)
-bool CAN_TIMEOUT_FLAG = false;
-bool CAN_SEND_FLG1 = 0;
-bool CAN_SEND_FLG2 = 0;
-bool OVERDIV_FLAG = 0;
-
-unsigned int ACCUM_MAXVOLTAGE = VMAX_CELL * CELL_NUM; // Expected
-byte  VmaxCell ,VminCell ,TempMaxCell ,dVmax;
-
+void immediateCheck_ACCUM_OVERDIV_OK(uint16_t OVERDIV_CRITICALstatusbit);
+void immediateCheck_BMU_FAULTY(int Module , BMSdata *BMS_ROSPackage);
+void twaiTroubleshoot();
 
 /*******************************************************************
   ==============================Setup==============================
@@ -167,6 +191,7 @@ void setup() {
   pinMode(SDCIN,INPUT_PULLDOWN); 
   pinMode(OBCIN,INPUT_PULLDOWN);
   pinMode(BMSOUT,OUTPUT);
+  
   // // In case of specific troubleshooting
   pinMode(IMDIN,INPUT_PULLDOWN);
   pinMode(BSPDIN,INPUT_PULLDOWN);
@@ -214,7 +239,6 @@ void setup() {
       TWAI_ALERT_RX_QUEUE_FULL  0x00000800    Alert(2048) : The RX queue is full causing a frame to be lost
       */
       // Reconfigure the alerts to detect the error of frames received, Bus-Off error and RX queue full error
-      // Configure Alert flag , which alert or Error can be raised
       uint32_t alerts_to_enable = TWAI_ALERT_RX_DATA | TWAI_ALERT_ERR_PASS | TWAI_ALERT_BUS_ERROR | TWAI_ALERT_RX_QUEUE_FULL;
       if (twai_reconfigure_alerts(alerts_to_enable, NULL) == !ESP_OK) {
         Serial.println("Failed to reconfigure alerts");
@@ -222,25 +246,19 @@ void setup() {
       }
     }
 
+  // Setup timer for 100ms intervals
+  unsigned int time1 = (SYNC_TIME/2) * 1000 ;
+  My_timer1 =  timerBegin(0, 80, true);  // Timer with prescaler
+  timerAttachInterrupt(My_timer1, &onTimer1, true);
+  timerAlarmWrite(My_timer1, time1, true);  // 100ms interval
+  timerAlarmEnable(My_timer1);
 
-    //  Timer interrupt (From Hal) for tasks
-    // Setup timer for 100ms intervals
-      My_timer1 =  timerBegin(0, 80, true);  // Timer with prescaler
-      timerAttachInterrupt(My_timer1, onTimer1, true);
-      timerAlarmWrite(My_timer1, 100000, true);  // 100ms interval
-      timerAlarmDisable(My_timer1);
-
-      // Setup timer for 500ms intervals 
-      My_timer2 = timerBegin(0, 80, true);
-      timerAttachInterrupt(My_timer2, onTimer2, true);
-      timerAlarmWrite(My_timer2, 500000, true);  // 500ms interval
-      timerAlarmDisable(My_timer2);
-
-    // Ticker for debugging Set all the Ticker for debugging via serial monitor (Just Module 0)
-      // ticker1.attach_ms( (SYNC_TIME) , debugBMUmsg, 0);
-      // ticker2.attach_ms( (SYNC_TIME * 5) ,debugBMUmsg, 0); 
-      // ticker3.attach_ms( (OBC_SYNC_TIME) , debugOBCmsg);
-      // ticker4.attach_ms( (SYNC_TIME), debugSDC);
+  // // Setup timer for 500ms intervals 
+  unsigned int time2 = (OBC_SYNC_TIME)*1000 ;
+  My_timer2 = timerBegin(1, 80, true);
+  timerAttachInterrupt(My_timer2, &onTimer2, true);
+  timerAlarmWrite(My_timer2, time2, true);  // 500ms interval
+  timerAlarmEnable(My_timer2);
 
     Serial.println("BCU__initialized__");
 }
@@ -250,169 +268,211 @@ void setup() {
 ********************************************************************/
 
 void loop(){
-
-    /* ==================================================== Task 3 : Communication ====================================================*/
-  /*------------------------------------------Message Transmission Routine*/ 
-
-  // BCU CMD & SYNC   (100ms cycle Broadcast to all BMU modules in Bus) 
-
-  if (CAN_SEND_FLG1){
-    CAN_SEND_FLG1=0; // reset
-    packBMUmsg(&sendMessage);
-    twai_transmit(&sendMessage, pdMS_TO_TICKS(1));
-  } 
-
-  if(CAN_SEND_FLG2 && CHARGING_FLAG){
-    CAN_SEND_FLG2=0; // reset
-    packOBCmsg(&sendMessage, OVERDIV_FLAG );
-    twai_transmit(&sendMessage, pdMS_TO_TICKS(1));
-  }
-
-  // if( millis()-reference_time >= (SYNC_TIME/2)) 
-  // {
-  //   packBMUmsg(&sendMessage);
-  //   twai_transmit(&sendMessage, pdMS_TO_TICKS(1));
-  //   reference_time = millis();
-  // }
-  // // BCU => OBC       (500ms cycle) , only when CHARGING_FLAG = TRUE
-  // if(millis()-reference_time2 >= OBC_SYNC_TIME && CHARGING_FLAG ) 
-  // {
-  //   packOBCmsg(&sendMessage, OVERDIV_cmd );
-  //   twai_transmit(&sendMessage, pdMS_TO_TICKS(1));
-  //   reference_time2 = millis();
-  // }
-
-  /* Debug and troubleshoot TWAI bus
-  //Error Alert message
-  uint32_t alerts_triggered;
-  twai_status_info_t status_info;
-  // Check if alert triggered
-  twai_read_alerts(&alerts_triggered, pdMS_TO_TICKS(1000));
-  twai_get_status_info(&status_info);
-  */
-    
-  /*------------------------------------------Message Reception Routine*/
+  /* CORE1 for coordinating BMS and Electrical System*/
   
-  // if RX buffer isn't cleared after its full within 1ms it alert will fired
-  if (twai_receive(&receivedMessage, pdMS_TO_TICKS(1)) == ESP_OK) 
-  {
-    // Basic Debug
-    Serial.printf("%X\n", receivedMessage.identifier);
-    for (int i = 0; i < receivedMessage.data_length_code; i++) 
-        Serial.printf("%X",receivedMessage.data[i]);
-     Serial.println();
+  /* CORE0 for coordinating with Telemetry socket CAN*/
+  // digitalWrite(BMSOUT, 1);
 
-    checkModuleTimeout();
-
-    // Pack data into BMS_ROSPackage: 
-      // ----Driving
-      unpackBMUmsg(&receivedMessage, &BMS_ROSPackage); // 200ms cycle & 1000ms cycle of faultcode
-      // ----Charging
-      if(CHARGING_FLAG)
-        unpackOBCmsg(&receivedMessage); // 500ms cycle
-
-    // Update timeout flag and communication_timer
-    CAN_TIMEOUT_FLAG = false;
-    communication_timer1 = millis();
-      
-  } 
-  else if (millis()-communication_timer1 >= TIMEOUT_TIME)
-  {
-    CAN_TIMEOUT_FLAG = true;
-  }
-  
-  /* ====================================================Task 1 : Check Fault, Shutdown==================================================== */ 
-    //  Read SHUTDOWN_OK_SIGNAL signal according to the actual physical voltage of SDC
-    // (digitalRead(SDCIN)) ? (SDCstat.SHUTDOWN_OK_SIGNAL = 1) : (SDCstat.SHUTDOWN_OK_SIGNAL = 0);
-    // Read IMD_Ok and BSPD_OK status from shutdown circuit
+  // Later priority Logic shifter reading
+    bool &AIRplus = SDCstat.SHUTDOWN_OK_SIGNAL; 
+    bool &BMS_OK = SDCstat.BMS_OK;
+    bool &IMD_OK = SDCstat.IMD_OK; 
+    bool &BSPD_OK = SDCstat.BSPD_OK; 
+    // Read SDC output signal to AIR+
+    (digitalRead(SDCIN)) ? (AIRplus = 1) : (AIRplus = 0);
+    // Read IMD_Ok and BSPD_OK status from SDC
     (digitalRead(IMDIN)) ? (IMD_OK = 1) : (IMD_OK = 0);
     (digitalRead(BSPDIN)) ? (BSPD_OK = 1) : (BSPD_OK = 0);
     // Confirm if the Charger is actually plugged (May change to interrupt)
-    (digitalRead(OBCIN)) ? (CHARGING_FLAG = true) : (CHARGING_FLAG = false);
+    (digitalRead(OBCIN)) ? (CHARGER_PLUGGED = true) : (CHARGER_PLUGGED = false);
 
-    // case 0 : communication timeout, via wiring or protocol error , lock MCU in this condition loop
-    if( CAN_TIMEOUT_FLAG ) {
-      // Reset the entired structure
-      for(short i =0 ; i <BMU_NUM ; i++)
-        BMS_ROSPackage[i] = BMSdata(); 
-      digitalWrite(BMSOUT,LOW);
-      if( millis()-shutdown_timer1 >= 400){
-        Serial.println("CANBUS_INACTIVE");
+  /* ==================================================== Task 0 : Communication ====================================================*/
+  /*------------------------------------------Message Transmission Routine*/ 
+  
+  // BCU CMD & SYNC   (100ms cycle Broadcast to all BMU modules in Bus) 
+  if (CAN_SEND_FLG1)
+  {
+    CAN_SEND_FLG1=0; // reset
+    packBMUmsg(&sendMessage, SYNC_TIME , CHARGER_PLUGGED);
+    twai_transmit(&sendMessage, 1);
+  } 
+  if(CAN_SEND_FLG2 && CHARGER_PLUGGED)
+  {
+    CAN_SEND_FLG2=0; // reset
+    packOBCmsg(&sendMessage, BMS_OK, ACCUM_CHG_READY_OK, ACCUM_OVERDIV_OK, ACCUMULATOR_FULL);
+    twai_transmit(&sendMessage, 1);
+  }
+ 
+  /*------------------------------------------Message Reception Routine*/
+
+  // if RX buffer isn't cleared after its full within 1ms it alert will fired
+  if (twai_receive(&receivedMessage, 1) == ESP_OK) 
+  {
+    // Set state BMS_OK = 1
+    // digitalWrite();
+    // Basic Debug
+    // Serial.printf("%X\n", receivedMessage.identifier);
+    // for (int i = 0; i < receivedMessage.data_length_code; i++) 
+    //     Serial.printf("%X",receivedMessage.data[i]);
+    //  Serial.println();
+
+    checkModuleTimeout();
+
+    // Unpacke CAN frame to BMS_ROSPackage: 
+      // ----Driving
+      unpackBMUmsg(&receivedMessage, &(BMS_ROSPackage[0])); // 200ms cycle & 1000ms cycle of faultcode
+      // ----Charging
+      if(CHARGER_PLUGGED)
+        unpackOBCmsg(&receivedMessage); // 500ms cycle
+
+    // Update timeout flag and communication_timer
+    CAN_TIMEOUT_FLG = false;
+    communication_timer1 = millis();
+  } 
+  // if no byte received from CAN bus , run this code and return until the bus is active
+  else if (millis()-communication_timer1 >= TIMEOUT_TIME){
+    // Pull BMSOUT = LOW
+    digitalWrite(BMSOUT,LOW);
+    CAN_TIMEOUT_FLG = true;
+    if( millis()-shutdown_timer1 >= 400 ){
+        Serial.println("NO_BYTE_RECV");
         shutdown_timer1 = millis();
-      }
+    }
+    // Reset data structure back to default, to prevent reading garbage value
+    for (int i = 0; i < BMU_NUM; i++) {
+      BMS_ROSPackage[i].~BMSdata(); // Explicitly call destructor (optional)
+      new (&BMS_ROSPackage[i]) BMSdata(); // Placement new to reinitialize
+    }
+    SDCstat = SDCstatus();
+    // digitalWrite(BMSOUT,BMS_OK);
+    // Serial.println("NO_BYTE_RECV");
+    return;
+  }
+    
+  
+  /* ====================================================Task 2 : Determine BMS_OK relay state ==================================================== */
+    
+    // Pulling data from BMS_ROSPackage to decide on BMS_OK state
+    // Faulting Matrix , looping to check : (May need to improve to a more time efficient method)
+
+    // IF ANY of the Module is at Critical Raise a Fault flag, BMS_OK = 0;
+    // Check Fault Condition of all Module 
+
+
+    // ACCUM_OK =  BMS_ROSPackage[0].BMU_FAULTY | BMS_ROSPackage[1].BMU_FAULTY | BMS_ROSPackage[2].BMU_FAULTY |
+                // BMS_ROSPackage[3].BMU_FAULTY | BMS_ROSPackage[4].BMU_FAULTY | BMS_ROSPackage[5].BMU_FAULTY |
+                // BMS_ROSPackage[6].BMU_FAULTY | BMS_ROSPackage[7].BMU_FAULTY;
+    ACCUM_OK =  BMS_ROSPackage[0].BMU_FAULTY | BMS_ROSPackage[1].BMU_FAULTY;
+    
+    (ACCUM_OK > 0) ? (BMS_OK = 0) : (BMS_OK = 1);
+    
+
+    /*------- Coordiante BMU cell Balancing with OBC ------------*/
+    // Check if BMU must be ready to charge
+    // ACCUM_CHG_READY_OK =  BMS_ROSPackage[0].BMUreadytoCharge & BMS_ROSPackage[1].BMUreadytoCharge & BMS_ROSPackage[2].BMUreadytoCharge &
+    //                       BMS_ROSPackage[4].BMUreadytoCharge & BMS_ROSPackage[5].BMUreadytoCharge & BMS_ROSPackage[6].BMUreadytoCharge & 
+    //                       BMS_ROSPackage[7].BMUreadytoCharge;
+
+    // ACCUM_CHG_READY_OK =  BMS_ROSPackage[0].BMUreadytoCharge & BMS_ROSPackage[1].BMUreadytoCharge ;
+
+
+    // // if BMU(s) respond with Charger ready OK = 1 , then we start the operation
+    // (OBCstatusbit > 0) ? (OBC_OK = 0): (OBC_OK = 1);
+
+    // if(CHARGER_PLUGGED)
+    //   ((ACCUM_OK & OBC_OK) > 0) ? (BMS_OK = 0) : (BMS_OK = 1);
+  
+    // // Convert V_MODULE back to physical value
+    // ( ACCUMULATOR_VOLTAGE >= 0.9 * ACCUM_MAXVOLTAGE) ? (ACCUMULATOR_FULL = 1) : (ACCUMULATOR_FULL = 0) ;
+
+    // (ACCUMULATOR_VOLTAGE <= 1.12 * ACCUM_MINVOLTAGE) ? (ACCUMULATOR_LOW_VOLTAGE = 1) : (ACCUMULATOR_LOW_VOLTAGE = 0) ;
+
+    // // case 1 Full voltage
+    // (ACCUMULATOR_FULL) ? (BMS_OK = 0) : (BMS_OK = 1);
+    // /* Signal to */
+    // // case 2 Low Voltage
+    // (ACCUMULATOR_LOW_VOLTAGE) ? (BMS_OK = 0) : (BMS_OK = 1);
+    /*Signal to LowVoltage light*/
+
+    // Serial Debug for which cells should be displayed as warning or critical
+    // Serial.println(BMS_ROSPackage[0].BalancingDischarge_Cells,BIN); 
+
+  
+  /* ====================================================Task 1 : Check Fault, Shutdown ==================================================== */ 
+    
+    // case 0 : communication timeout, via wiring or protocol error , lock MCU in this condition loop
+    // if( CAN_TIMEOUT_FLG ) {
+    //   // Reset the entired structure
+    //   // for(short i =0 ; i <BMU_NUM ; i++)
+    //   //   BMS_ROSPackage[i] = BMSdata(); 
+    //   // Timeout we set BMS_OK as 0
+    //   // BMS_OK = 0; // Reaffirm BMS_OK state to be 0 , as No Byte recieve
+    //   digitalWrite(BMSOUT,BMS_OK);
+    //   if( millis()-shutdown_timer1 >= 400){
+    //     Serial.println("NO_BYTE_RECV");
+    //     shutdown_timer1 = millis();
+    //   }
+    //   return;
+    // }
+    // // case 1: BMS detect fault , BMS_OK output LOW 
+    // else if ( !BMS_OK ) {
+    //   digitalWrite(BMSOUT,BMS_OK); 
+    // }
+    // // case 2 , BMS operate Normally , BMS output HIGH
+    // else if (BMS_OK) {
+    //   digitalWrite(BMSOUT,BMS_OK);
+    //   // Reset affirm status as Normal Operation
+    //   // BMS_OK = 1;
+    // }
+
+    
+
+    // case 1: BMS detect fault , BMS_OK output LOW 
+    if ( !BMS_OK ) {
+      digitalWrite(BMSOUT,LOW); 
+    }
+    // case 2 , BMS operate Normally , BMS output HIGH
+    else if (BMS_OK) {
+      digitalWrite(BMSOUT,HIGH);
+      // Reset affirm status as Normal Operation
+      // BMS_OK = 1;
+    }  
+    if(millis()-reference_time >= 400){
+      Serial.println(ACCUM_OK);
+      Serial.print("BMSOK");Serial.println(BMS_OK);
+      reference_time = millis();
     }
     
-    // case 1: BMS detect fault , BMS_OK output LOW , while SHUTDOWN_OK_SIGNAL either read HIGH or LOW.
-    else if ( !BMS_OK ) {
-      digitalWrite(BMSOUT,LOW); 
-    }
-    // case 3 , Both BMS and SDC operate Normally , BMS output HIGH & SHUTDOWN_OK_SIGNAL read HIGH
-    else if( (BMS_OK) && (SDC_OK_SIGNAL) ) {
-      digitalWrite(BMSOUT,HIGH);
-      // Reset status as Normal Operation
-      BMS_OK = 1;
-      SDC_OK_SIGNAL = 1;
-    } 
-    // May be this case isn't needed
-    // case 3: Fault due to other system , BMS_OK HIGH , SHUTDOWN_OK_SIGNAL read LOW , IMD , and BSPD may read HIGH or low
-    else {
-      digitalWrite(BMSOUT,LOW); 
-    /* เมื่อกี้ ปิดตัวบนแล้วทำไม work  ต้องตรวจสอบดู*/
-    }
+    // Whilst happend AIR+ can be any affect by any fault relay , BSPD , IMD.
 
     // when fault code detected, yes this works , but when receiving with cell data msg, why sometimes the light blink?
     // Problem , once the shutdown state is reached,  and back to normal operation , the state of Relay won't reset
-    
-
-  /* ====================================================Task 2 : Determine BMS_OK relay state ==================================================== */
-    (OBCstatusbit > 0) ? (BMS_OK = 0): (BMS_OK = 1);
-    // Faulting Matrix , looping to check : (May need to improve to a more time efficient method)
-    bool FAULTCHECKSUM;
-    // IF ANY of the Module is at Critical Raise a Fault flag, BMS_OK = 0;
-    FAULTCHECKSUM = BMS_ROSPackage[0].BMU_FAULTY | BMS_ROSPackage[1].BMU_FAULTY | BMS_ROSPackage[2].BMU_FAULTY |
-                    BMS_ROSPackage[3].BMU_FAULTY | BMS_ROSPackage[4].BMU_FAULTY | BMS_ROSPackage[5].BMU_FAULTY |
-                    BMS_ROSPackage[6].BMU_FAULTY | BMS_ROSPackage[7].BMU_FAULTY;
-    (FAULTCHECKSUM > 0) ? (BMS_OK = 0) : (BMS_OK = 1);
-
-    // IF ANY of the Module is at Warning Raise a Warn Flag , BMS_Ok , still 1 
-    // Dealing with warning flag
-
-    /*------- Coordiante BMU cell Balancing with OBC ------------*/
-
-      bool OVERDIV_cmd = 0;
-      // CMD_BMUBalanceMode();
-      // Use  to Balance_DischargeNum to debug for which cells should be displayed as warning or critical
-      // Serial.println(BMS_ROSPackage[0].BalancingDischarge_Cells,BIN); // Just Simple Serial debug for only first module
-
-
-
   
   /*-------------- BMSROS_Package debug with SD card logger -------------*/
-  // Packing data to
-  
+  // Packing data to SD
+  // packing data to Remote System using CORE0
   /*-------------- CORE 0 Tasks -------------*/
   // ROS , Ethernet publishy function
 
   /*-------------- CORE 1 Tasks -------------*/
-  
-
   // After publishing to ROS , reset all BMU data with for loop
+
+  // reset state with default constructor at the end of all task 
+  
 } 
 
 /*******************************************************************
   ====================Local Functions Definition====================
 ********************************************************************/
 
-void packBMUmsg ( twai_message_t *BCUsent) {
+void packBMUmsg ( twai_message_t *BCUsent, uint16_t Sync_time,  bool &is_charger_plugged) {
 
-  BCUsent->identifier  = 0x10E0E500; // BCU ID
+  BCUsent->identifier  = BCU_ADD; // BCU ID
   BCUsent->data_length_code = 8;
-  
   // BMU synchronize time
-  BCUsent->data[0] = SYNC_TIME;
-  // Balance Active Command
-  (CHARGING_FLAG) ? (BCUsent->data[1] = 1) : (BCUsent->data[1] = 0);
-  
+  BCUsent->data[0] = Sync_time;
+  // Notify Charge
+  (is_charger_plugged) ? (BCUsent->data[1] = 1) : (BCUsent->data[1] = 0);
   // Distribute Default parameter
   BCUsent->data[2] = VmaxCell; 
   BCUsent->data[3] = VminCell; 
@@ -447,34 +507,34 @@ void unpackBMUmsg ( twai_message_t* BCUreceived , BMSdata *BMS_ROSPackage) {
   /*  Message Priority 11 :: BMUModule & Cells data  */
   if(decodedCANID.PRIORITY == 0x11)
   {
-    // Sort out the cell message
+    // Sort out the cell message number
     switch (decodedCANID.MSG_NUM) 
     { 
       // MSG1 == Operation status
       case 1:
-        // Operation status
-        BMS_ROSPackage[i].BMUOperationStatus = BCUreceived->data[0];
+        // Charging Ready
+        BMS_ROSPackage[i].BMUreadytoCharge = BCUreceived->data[0];
         // Balancing Discharge cell number
         BMS_ROSPackage[i].BalancingDischarge_Cells = mergeHLbyte(BCUreceived->data[1],BCUreceived->data[2]);
         // Vbatt (Module) , dVmax(cell)
         BMS_ROSPackage[i].V_MODULE = BCUreceived->data[3]; 
+        ACCUMULATOR_VOLTAGE += BCUreceived->data[3] * 0.2; // add to ACCUM
         BMS_ROSPackage[i].DV = BCUreceived->data[4]; 
         // Temperature sensor
         BMS_ROSPackage[i].TEMP_SENSE[0] = BCUreceived->data[5];
         BMS_ROSPackage[i].TEMP_SENSE[1] = BCUreceived->data[6];
-        
         break;
 
       case 2:
-        // Low series Side Cell C1-C7
+        // Low series Side Cell C1-C8
         for(short j=0; j< 8; j++)
-          BMS_ROSPackage[i].V_CELL[j] = BCUreceived->data[i]*0.02;
+          BMS_ROSPackage[i].V_CELL[j] = BCUreceived->data[i];
         break;
 
       case 3:
-        // High series side Cell C8-C10
+        // High series side Cell C8-CellNumber
         for( short j = 8; j <= 15; j++ )
-          BMS_ROSPackage[i].V_CELL[j] = BCUreceived->data[i-8]*0.02;
+          BMS_ROSPackage[i].V_CELL[j] = BCUreceived->data[i-8];
         break;
     }
   }
@@ -487,7 +547,6 @@ void unpackBMUmsg ( twai_message_t* BCUreceived , BMSdata *BMS_ROSPackage) {
     switch (decodedCANID.MSG_NUM)
     {
       case 1:
-
         // Merge H and L byte of each FaultCode back to 10 bit binary
         BMS_ROSPackage[i].OVERVOLTAGE_WARNING =  mergeHLbyte( BCUreceived->data[0], BCUreceived->data[1] );  
         BMS_ROSPackage[i].OVERVOLTAGE_CRITICAL = mergeHLbyte( BCUreceived->data[2], BCUreceived->data[3] );  
@@ -495,52 +554,31 @@ void unpackBMUmsg ( twai_message_t* BCUreceived , BMSdata *BMS_ROSPackage) {
         BMS_ROSPackage[i].LOWVOLTAGE_CRITICAL = mergeHLbyte( BCUreceived->data[6], BCUreceived->data[7] ); 
         break;
       case 2:
-       
         // Merge H and L byte of each FaultCode back to 10 bit binary
         BMS_ROSPackage[i].OVERTEMP_WARNING = mergeHLbyte( BCUreceived->data[0], BCUreceived->data[1] );  
         BMS_ROSPackage[i].OVERTEMP_CRITICAL = mergeHLbyte( BCUreceived->data[2], BCUreceived->data[3] ); 
         BMS_ROSPackage[i].OVERDIV_VOLTAGE_WARNING = mergeHLbyte( BCUreceived->data[4], BCUreceived->data[5] ); 
         BMS_ROSPackage[i].OVERDIV_VOLTAGE_CRITICAL = mergeHLbyte( BCUreceived->data[6], BCUreceived->data[7] );
+        // Immediately check the first Module that contains cells with dV over critical
+        immediateCheck_ACCUM_OVERDIV_OK(mergeHLbyte( BCUreceived->data[6], BCUreceived->data[7] ) ); // Figure out when should OBC hold off its operation whilist balancing
         break;
     }
-    FAULT_CODE_Check(i,BMS_ROSPackage);
+    // Immediately check this Module if Faultcode pass filter condition
+    immediateCheck_BMU_FAULTY(i,BMS_ROSPackage); 
+    
   }
 }
-
-void checkModuleTimeout(){
-  CANIDDecoded decodedCANID;
-  decodeExtendedCANID(&decodedCANID,receivedMessage.identifier);
-  // Naming Convention of src address is BMU number
-  // if the ID is zero meaning that it isn't here
-
-  // Do not monitor any messsage that is not associate with BMS channel
-  if(decodedCANID.BASE_ID != 0x0E && decodedCANID.DEST != 0xE5)
-    return;
-
-  if(receivedMessage.identifier == 0x00){
-
-  }
-    // else if until one condition is true
-
-
-  // Set BMSdata.BMUactive = 0; for any that doesn't pass the filter condition
-  // return;
-
-}
-
-// also for the case of Diff Voltage, the div voltage should not trigger The OK condition
-void packOBCmsg ( twai_message_t *BCUsent, bool OVERDIV_CRIT_cmd ) {
+void packOBCmsg ( twai_message_t *BCUsent, bool &BMS_OK , bool &ReadytoCharge, bool &OverDivCritical_Yes, bool &Voltage_is_Full) {
 
   /* Set up BMS CAN frame*/
-  BCUsent->identifier  = 0x1806E5F4; // refers to specification sheet
+  BCUsent->identifier  = OBC_ADD; // refers to specification sheet
   BCUsent->data_length_code = 8;
   // Reserved
   BCUsent->data[5] = 0x00;
   BCUsent->data[6] = 0x00;
   BCUsent->data[7] = 0x00;
-
-  // Condition 1 iF BMS_OK OR Manual cmd DivVoltage commands,
-  if(BMS_OK || OVERDIV_CRIT_cmd) {
+  // Condition 1 iF BMS_OK AND ACCUM is Ready Any Module not Critically OVERDIV, ACCUMULATOR VOLTAGE ISN"T FULL YET
+  if((BMS_OK && ReadytoCharge) || !OverDivCritical_Yes || !Voltage_is_Full) {
     BCUsent->data[0] = 0x0C; // V highbyte 
     BCUsent->data[1] = 0x80; // V lowbyte 72.0 V fake data -> Range 69-72-74 V
     BCUsent->data[2] = 0x00; // A Highbyte
@@ -548,10 +586,10 @@ void packOBCmsg ( twai_message_t *BCUsent, bool OVERDIV_CRIT_cmd ) {
     BCUsent->data[4] = 0x00; // Control Byte 0 charger operate
   } else {
     // Condition 0 Shutdown message
-    BCUsent->data[0] = 0x00; // V highbyte 
-    BCUsent->data[1] = 0x00; // V lowbyte
-    BCUsent->data[2] = 0x00; // A Highbyte
-    BCUsent->data[3] = 0x00; // A Lowbyte
+    BCUsent->data[0] = 0x00; 
+    BCUsent->data[1] = 0x00; 
+    BCUsent->data[2] = 0x00; 
+    BCUsent->data[3] = 0x00;
     BCUsent->data[4] = 0x01; // Control Byte 1 charger shutdown
   } 
 
@@ -560,6 +598,7 @@ void unpackOBCmsg ( twai_message_t *BCUreceived ) {
   // if message ID isnt 0x18FF50E5 , return
   if(BCUreceived->identifier != 0x18FF50E5)
     return;
+  
     // Monitor & Translate current Frame data
     uint8_t VoutH = BCUreceived->data[0];
     uint8_t VoutL = BCUreceived->data[1];
@@ -568,15 +607,50 @@ void unpackOBCmsg ( twai_message_t *BCUreceived ) {
     OBCstatusbit =  BCUreceived->data[4]; // Status Byte
     OBCVolt = mergeHLbyte(VoutH,VoutL);
     OBCAmp = mergeHLbyte(AoutH,AoutL);
+
 }
+void checkModuleTimeout(){
+  // Relying on the immediate reception frame isn't reliable
+  // I need reception frame to accumulate for about the same time as timeout 4s
+  // during that time also check for BMSROS , access its active
 
+  // CANIDDecoded decodedCANID;
+  // decodeExtendedCANID(&decodedCANID,receivedMessage.identifier);
+  // // Naming Convention of src address is BMU number
+  // // if the ID is zero meaning that it isn't here
 
+  // // Do not monitor any messsage that is not associate with BMS channel
+  // if(decodedCANID.BASE_ID != 0x0E && decodedCANID.DEST != 0xE5)
+  //   return;
+
+  // if(receivedMessage.identifier == 0x00){
+  //   BMS_ROSPackage->BMUActive = 0;
+  // }
+    // else if until one condition is true
+
+  // Set BMSdata.BMUactive = 0; for any that doesn't pass the filter condition
+  return;
+
+}
+void checkACCUMULATORvoltage (){
+  // Perform Immediate Check on main Loop
+  // Convert V_MODULE back to physical value
+  if( ACCUMULATOR_VOLTAGE >= 0.9 * ACCUM_MAXVOLTAGE)
+    ACCUMULATOR_FULL = 1;
+  else
+    ACCUMULATOR_FULL = 0;
+
+  if(ACCUMULATOR_VOLTAGE <= 1.12 * ACCUM_MINVOLTAGE)   
+    ACCUMULATOR_LOW_VOLTAGE = 1;
+  else
+    ACCUMULATOR_LOW_VOLTAGE = 0;
+}
 /* ==================================Serial Debugger==============================*/
 // Use Non-Block string , there's literally no perfect way to Serial Debug asynchronusly
-
+// maybe use this on Core 0
 void debugBMUmsg(int Module){
 
-    Serial.print("BMU Operation Status: "); Serial.println(BMS_ROSPackage[Module].BMUOperationStatus);
+    Serial.print("BMU Operation Status: "); Serial.println(BMS_ROSPackage[Module].BMUreadytoCharge);
     Serial.print("Cell balancing discharge: "); Serial.println(BMS_ROSPackage[Module].BalancingDischarge_Cells);
     Serial.print("V_CELL C1-10: ");
     // can change to vector , for easy looping funcion
@@ -595,7 +669,7 @@ void debugBMUmsg(int Module){
 
 }
 void debugBMUFault(int Module){
-  if(!BMS_OK){
+  if(!SDCstat.BMS_OK){
     Serial.print("OVERVOLTAGE_CRITICAL_CELLS (C1-C10): ");
     Serial.println(BMS_ROSPackage[Module].OVERVOLTAGE_CRITICAL,HEX);
     Serial.print("UNDERVOLTAGE_CRITICAL_CELLS (C1-C10): ");
@@ -658,7 +732,7 @@ void debugOBCmsg(){
 void debugSDC(){
   
   // Signal = 1 means at fault
-  if(CAN_TIMEOUT_FLAG)
+  if(CAN_TIMEOUT_FLG)
     Serial.println();
 
   // Signal = 0 means at fault
@@ -674,12 +748,9 @@ void debugSDC(){
   
 }
 
-// Record to SD card
-// Yuil sketch function to publish ROS topics
-
-// Sub-function
-
-void FAULT_CODE_Check(int Module , BMSdata *BMS_ROSPackage) {
+// ---------------------------------------------------------------Sub-function
+// Perform immediate Check during the execution of unpack();
+void immediateCheck_BMU_FAULTY(int Module , BMSdata *BMS_ROSPackage) {
   // Compile the warning flag , to signal GUI that specific module at CRITICAL
   BMS_ROSPackage[Module].BMU_FAULTY = BMS_ROSPackage[Module].OVERVOLTAGE_CRITICAL | BMS_ROSPackage[Module].LOWVOLTAGE_CRITICAL 
                                 | BMS_ROSPackage[Module]. OVERTEMP_CRITICAL;
@@ -687,50 +758,48 @@ void FAULT_CODE_Check(int Module , BMSdata *BMS_ROSPackage) {
   BMS_ROSPackage[Module].BMU_WARNING = BMS_ROSPackage[Module].OVERVOLTAGE_WARNING | BMS_ROSPackage[Module].LOWVOLTAGE_WARNING 
                                 | BMS_ROSPackage[Module]. OVERTEMP_WARNING;
 }
-
-void CMD_BMUBalanceMode(int Module , BMSdata *BMS_ROSPackage) {
-  return;
+void immediateCheck_ACCUM_OVERDIV_OK(uint16_t OVERDIV_CRITICALstatusbit) {
+  // Perform Immediate Check on BMU frame
   // to reduce to just one loop , because it is inevitable , unless I use the bit shift command for each i , hmmm interesting 
-  
-    // OVER_DIV_VOLTAGE during charging --
-      // Full condition , check for Module 1- Module BMU_NUM ,, using simple bit shift operation
-      // 1. Chop up BMU operation status bit to 8, takes 4
-      // bool *bitarrayholder = nullptr;
-      
-      // for(short i =0 ; i <BMU_NUM; i++){
-      //   BMS_ROSPackage;
-      //   toBitarrayMSB(BMS_ROSPackage[i].);
-        
-
-      //   // now the case that VmaxCell >= VmaxCell * 0.9
-      // }
-
-      // 4.1 Charging Ready , if so Activiate charger
-
-      // 4.2 Low Voltage warning , if so turn on BMS low Voltage warning LED light
-      // 4.3 Voltage Full (Over Voltage warning) , if so turn on the 
-
 
       // Extra** (Not in the operation status, but) OverVoltage critical , shutdown , and also turn off the charger
       // for(short i =0 ; i <BMU_NUM; i++){
 
-      //   if(BMS_ROSPackage[i].BMUOperationStatus < VmaxCell *0.9);
-      //     break;
-        
+      // OVER_DIV_VOLTAGE critical 0.95* dVmax during charging --
+      // Full condition , check for Module 1- Module BMU_NUM ,, using simple bit shift operation
+      // Copy BMU OVERDIV Faultcode into temp variable
 
-      //   // now the case that VmaxCell >= VmaxCell * 0.9
-      // }
-      
-      // BMS_ROSPackage[0].OVERDIV_VOLTAGE_WARNING; // >0.9*Vmax
-      // BMS_ROSPackage[0].OVERDIV_VOLTAGE_CRITICAL; // >= 0.95 Vmax
-      // // Analyze which cell is in the state of warning or critical state
-      // //case 1 : WARNING => Trigger balance discharge on each specific
+
+      // int bitHolder1 = BMS_ROSPackage[Module].OVERDIV_VOLTAGE_WARNING; // This Num must be The BMSROS.
+      // int bitHolder2 = BMS_ROSPackage[Module].OVERDIV_VOLTAGE_CRITICAL; // This Num must be The BMSROS.
+      unsigned int bitHolder = OVERDIV_CRITICALstatusbit;
+      // First cell to be found as overdiv critical will shutdown charger (Not Shutdown the BMS_OK)
+      for (int i = CELL_NUM - 1; i >= 0; i--) {
+        if( (bitHolder & 1) == 1 ) {
+          ACCUM_OVERDIV_OK = 1;
+          break; 
+        } else {
+          ACCUM_OVERDIV_OK = 0;
+        }
+        bitHolder >>= 1; // Right Shift num by 1 pos. before next loop , we AND with 1 again
+      }
+
+      // //case 1 : WARNING => Trigger balance discharge on each specific (BMU side)
       // //case 2 : CRITICAL => Trigger the same mechanism , plus add extra command , to OBC to stop charging operation
 
-
 }
+void twaiTroubleshoot(){
+  //Debug and troubleshoot TWAI bus
 
-
+  //Error Alert message
+  uint32_t alerts_triggered;
+  twai_status_info_t status_info;
+  // Check if alert triggered
+  twai_read_alerts(&alerts_triggered, pdMS_TO_TICKS(1));
+  twai_get_status_info(&status_info);
+  Serial.println(alerts_triggered);
+  
+}
 
 
 
@@ -815,8 +884,7 @@ void CMD_BMUBalanceMode(int Module , BMSdata *BMS_ROSPackage) {
 //         BMS_ROSPackage[i].OVERDIV_VOLTAGE_WARNING = mergeHLbyte( BCUreceived->data[4], BCUreceived->data[5] ); 
 //         BMS_ROSPackage[i].OVERDIV_VOLTAGE_CRITICAL = mergeHLbyte( BCUreceived->data[6], BCUreceived->data[7] );
 //         break;
-//     }
-    
+//     }  
 //   }
 // }
 

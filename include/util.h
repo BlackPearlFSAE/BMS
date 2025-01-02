@@ -22,11 +22,9 @@ uint16_t toUint16FromBitarrayMSB(const bool *bitarr);
 uint16_t toUint16FromBitarrayLSB(const bool *bitarr);
 
 
-// --Shutdown mechanism & BMS specific Util
+// CANBUS function
 
-
-#define STANDARD_BITRATE 500E3
-
+//Socket can style frame format
 struct _can_frame {
   uint32_t can_id;
   uint16_t can_dlc = 8;
@@ -39,6 +37,8 @@ struct _can_frame {
         memset(data, 0, sizeof(data));
         }
 };
+
+// For ID custom protocol
 struct CANIDDecoded {
     uint8_t PRIORITY;
     uint8_t BASE_ID;

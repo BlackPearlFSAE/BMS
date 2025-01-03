@@ -10,18 +10,12 @@ RTOS and Push ROS topics
 */
 
 /************************* Includes ***************************/
-// extern "C" {
-//   #include <driver/twai.h>
-// }
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include <driver/gpio.h>
 #include <driver/twai.h>
-#include "esp_log.h"
-#include <Ticker.h>
 // #include <freertos/FreeRTOS.h>
 // #include <micro_ros_arduino.h>
-
 // #include "FS.h"
 // #include "SD.h"
 // #include "SPI.h"
@@ -29,6 +23,7 @@ RTOS and Push ROS topics
 #include <EEPROM.h>
 // utility function
 #include <util.h>
+#include <AMS.h>
 
 /************************* Define macros *****************************/
 #define CAN_RX  GPIO_NUM_13
@@ -44,13 +39,6 @@ RTOS and Push ROS topics
 #define OBC_SYNC_TIME 500
 #define SYNC_TIME 200
 #define TIMEOUT_TIME 4000
-
-#define VMAX_CELL 4.2
-#define VMIN_CELL 3.2
-#define TEMP_MAX_CELL 60
-#define DVMAX 0.2
-#define CELL_NUM 16
-#define TEMP_SENSOR_NUM 2
 #define BMU_NUM 8
 #define OBC_ADD 0x1806E5F4
 #define BCU_ADD 0x01EE5000
@@ -64,112 +52,55 @@ unsigned long reference_time = 0; unsigned long reference_time2 = 0;
 unsigned long communication_timer1 = 0;
 unsigned long shutdown_timer1 = 0;
 // Ticker , Timer interrupt
-// Ticker ticker1; // Debugging BMU Cell msg
-// Ticker ticker2; // Debugging BMU Fault code msg
-// Ticker ticker3; // Debugging OBC Fault code msg
-// Ticker ticker4; // Debugging OBC Fault code msg
 hw_timer_t *My_timer1 = NULL;
 hw_timer_t *My_timer2 = NULL;
 
-// Data Aggregation , and Relay to Other Sub System , e.g. Telemetry , DataLogger, BMS GUI
-// Report BMS data, and Faulty status code // Serialize this data in 8 bit buffer
+// BMU data , Accumulator data structure , process in CORE1
+BMUdata BMU_Package[BMU_NUM];
+AMSdata AMS_Package;
+// Logic Shifting data , process in CORE0
+SDCsignal SDC_Signal_Board;
+OBCdata OBC_Package;
 
-/* Data send to Remote System */
-  // BMU data strcuture
-  struct BMSdata {
-    // Basic BMU Data
-    uint8_t V_CELL[CELL_NUM];
-    uint8_t TEMP_SENSE[TEMP_SENSOR_NUM];
-    uint8_t V_MODULE = 0;
-    uint8_t DV = 0;
-    // FaultCode 10 bit binary representation of C
-    uint16_t OVERVOLTAGE_WARNING = 0;
-    uint16_t OVERVOLTAGE_CRITICAL = 0;  
-    uint16_t LOWVOLTAGE_WARNING = 0;
-    uint16_t LOWVOLTAGE_CRITICAL = 0; 
-    uint16_t OVERTEMP_WARNING = 0;
-    uint16_t OVERTEMP_CRITICAL = 0;
-    uint16_t OVERDIV_VOLTAGE_WARNING = 0 ; // Trigger cell balancing of the cell at fault
-    uint16_t OVERDIV_VOLTAGE_CRITICAL = 0; // Trigger Charger disable in addition to Cell balancing
-    bool BMU_WARNING = 0;
-    bool BMU_FAULTY = 0;
+// Flag
+const bool EEPROM_WRITE_FLAG = true;
+bool CHARGER_PLUGGED = false;
+bool CAN_TIMEOUT_FLG = false;
+volatile bool CAN_SEND_FLG1 = false;
+volatile bool CAN_SEND_FLG2 = false;
 
+// Alias name
+bool &AMS_OK = AMS_Package.AMS_OK;
 
-    bool BMUconnected = 1;   // Default as Active true , means each BMU is on the bus
-    
-    // Status
-    uint16_t BalancingDischarge_Cells = 0;
-    uint8_t BMUreadytoCharge = 0;
-    
-    // Reset call
-    BMSdata() {
-          memset(V_CELL, 0, sizeof(V_CELL));
-          memset(TEMP_SENSE, 0, sizeof(TEMP_SENSE));
-          } 
-  }; 
+bool &OBC_OK = OBC_Package.OBC_OK;
+uint8_t &OBCFault = OBC_Package.OBCstatusbit;
+bool &ACCUM_ReadytoCharge = AMS_Package.ACCUMULATOR_CHG_READY;
+bool &ACCUM_OverDivCritical = AMS_Package.OVERDIV_CRITICAL;
 
-  
-  // struct OBCdata {
-  //   uint8_t OBCVolt = 0;
-  //   uint8_t OBCAmp = 0;
-  //   uint8_t OBCstatusbit = 0 ;   // During Charging
-  // };
-  // Physical condition of OBC On board charger , charging power , and safety information
-  uint8_t OBCVolt = 0;
-  uint8_t OBCAmp = 0;
-  uint8_t OBCstatusbit = 0 ;   // During Charging
+bool &ACCUM_Full = AMS_Package.OVERVOLT_WARNING;
+bool &LOW_VOLTAGE_LIGHT = AMS_Package.LOW_VOLTAGE_WARNING;
 
-  // Physical condition of SDC and LV Circuit, safety information , and relay it to Telemetry system
-  struct SDCstatus {
-    bool SHUTDOWN_OK_SIGNAL = 1; // AIR+
-    bool BMS_OK = 1; // AMS_OUT+ ,AMS_GND
-    bool IMD_OK = 1; // IMD_OUT
-    bool BSPD_OK = 1; // BSPD_OUT
-  };
+float &ACCUM_VOLTAGE = AMS_Package.ACCUMULATOR_VOLTAGE; 
+float &ACCUM_MAXVOLTAGE = AMS_Package.ACCUMULATOR_MAXVOLTAGE; 
+float &ACCUM_MINVOLTAGE = AMS_Package.ACCUMULATOR_MINVOLTAGE; 
 
-
-// ACCUMULATOR Data , Local to BCU (Make this a struct later , or not? , I don't want over access)
-bool  ACCUMULATOR_FULL;
-bool  ACCUMULATOR_LOW_VOLTAGE;
-float ACCUMULATOR_VOLTAGE = 0.0; 
-float ACCUM_MAXVOLTAGE = VMAX_CELL * CELL_NUM; // Expected
-float ACCUM_MINVOLTAGE = VMIN_CELL * CELL_NUM; // Expected
+bool &AIRplus = SDC_Signal_Board.AIRplus; 
+bool &IMD_Relay = SDC_Signal_Board.IMD_Relay; 
+bool &BSPD_Relay = SDC_Signal_Board.BSPD_Relay; 
 
 // Default Parameter
 byte  VmaxCell ,VminCell ,TempMaxCell ,dVmax;
 
-// Flag
-const bool EEPROM_WRITE_FLAG = 0;
-
-bool ACCUM_OK = 1;
-bool ACCUM_CHG_READY_OK = 0;
-bool ACCUM_OVERDIV_OK = 0;
-bool CHARGER_PLUGGED = false; // (use basic digitalRead())
-bool CAN_TIMEOUT_FLG = false;
-bool OBC_OK = 1;
-volatile bool CAN_SEND_FLG1 = false;
-volatile bool CAN_SEND_FLG2 = false;
-
-
-BMSdata BMS_ROSPackage[BMU_NUM];
-SDCstatus SDCstat;
-// OBCdata OBC_ROSPackage;
-
 /**************** Local Function Delcaration *******************/
-
 void packBMUmsg ( twai_message_t *BCUsent, uint16_t Sync_time,  bool &is_charger_plugged);
 void packOBCmsg ( twai_message_t *BCUsent, bool &BMS_OK , bool &ReadytoCharge, bool &OverDivCritical_Yes, bool &Voltage_is_Full);
 void unpackOBCmsg ( twai_message_t *BCUreceived );
-void unpackBMUmsg ( twai_message_t *BCUreceived, BMSdata *BMS_ROSPackage);
+void unpackBMUmsg ( twai_message_t *BCUreceived, BMUdata *BMS_ROSPackage);
 void debugBMUmsg(int Module);
 void debugBMUFault(int Module);
 void debugOBCmsg();
 void debugSDC();
 void checkModuleTimeout();
-void checkACCUMULATORvoltage ();
-
-void immediateCheck_ACCUM_OVERDIV_OK(uint16_t OVERDIV_CRITICALstatusbit);
-void immediateCheck_BMU_FAULTY(int Module , BMSdata *BMS_ROSPackage);
 void twaiTroubleshoot();
 
 /*******************************************************************
@@ -253,14 +184,14 @@ void setup() {
   timerAlarmWrite(My_timer1, time1, true);  // 100ms interval
   timerAlarmEnable(My_timer1);
 
-  // // Setup timer for 500ms intervals 
+  // Setup timer for 500ms intervals 
   unsigned int time2 = (OBC_SYNC_TIME)*1000 ;
   My_timer2 = timerBegin(1, 80, true);
   timerAttachInterrupt(My_timer2, &onTimer2, true);
   timerAlarmWrite(My_timer2, time2, true);  // 500ms interval
   timerAlarmEnable(My_timer2);
 
-    Serial.println("BCU__initialized__");
+  Serial.println("BCU__initialized__");
 }
 
 /*******************************************************************
@@ -269,22 +200,11 @@ void setup() {
 
 void loop(){
   /* CORE1 for coordinating BMS and Electrical System*/
-  
   /* CORE0 for coordinating with Telemetry socket CAN*/
-  // digitalWrite(BMSOUT, 1);
 
   // Later priority Logic shifter reading
-    bool &AIRplus = SDCstat.SHUTDOWN_OK_SIGNAL; 
-    bool &BMS_OK = SDCstat.BMS_OK;
-    bool &IMD_OK = SDCstat.IMD_OK; 
-    bool &BSPD_OK = SDCstat.BSPD_OK; 
-    // Read SDC output signal to AIR+
-    (digitalRead(SDCIN)) ? (AIRplus = 1) : (AIRplus = 0);
-    // Read IMD_Ok and BSPD_OK status from SDC
-    (digitalRead(IMDIN)) ? (IMD_OK = 1) : (IMD_OK = 0);
-    (digitalRead(BSPDIN)) ? (BSPD_OK = 1) : (BSPD_OK = 0);
-    // Confirm if the Charger is actually plugged (May change to interrupt)
-    (digitalRead(OBCIN)) ? (CHARGER_PLUGGED = true) : (CHARGER_PLUGGED = false);
+  // Confirm if the Charger is actually plugged (May change to external interrupt)
+  (digitalRead(OBCIN)) ? (CHARGER_PLUGGED = true) : (CHARGER_PLUGGED = false);
 
   /* ==================================================== Task 0 : Communication ====================================================*/
   /*------------------------------------------Message Transmission Routine*/ 
@@ -299,7 +219,7 @@ void loop(){
   if(CAN_SEND_FLG2 && CHARGER_PLUGGED)
   {
     CAN_SEND_FLG2=0; // reset
-    packOBCmsg(&sendMessage, BMS_OK, ACCUM_CHG_READY_OK, ACCUM_OVERDIV_OK, ACCUMULATOR_FULL);
+    packOBCmsg(&sendMessage, AMS_OK, ACCUM_ReadytoCharge , ACCUM_OverDivCritical , ACCUM_Full);
     twai_transmit(&sendMessage, 1);
   }
  
@@ -309,7 +229,6 @@ void loop(){
   if (twai_receive(&receivedMessage, 1) == ESP_OK) 
   {
     // Set state BMS_OK = 1
-    // digitalWrite();
     // Basic Debug
     // Serial.printf("%X\n", receivedMessage.identifier);
     // for (int i = 0; i < receivedMessage.data_length_code; i++) 
@@ -319,79 +238,87 @@ void loop(){
     checkModuleTimeout();
 
     // Unpacke CAN frame to BMS_ROSPackage: 
-      // ----Driving
-      unpackBMUmsg(&receivedMessage, &(BMS_ROSPackage[0])); // 200ms cycle & 1000ms cycle of faultcode
-      // ----Charging
-      if(CHARGER_PLUGGED)
-        unpackOBCmsg(&receivedMessage); // 500ms cycle
+    // ----Driving
+    unpackBMUmsg(&receivedMessage, &(BMU_Package[0])); // 200ms cycle & 1000ms cycle of faultcode
+    // ----Charging
+    if(CHARGER_PLUGGED)
+      unpackOBCmsg(&receivedMessage); // 500ms cycle
 
     // Update timeout flag and communication_timer
     CAN_TIMEOUT_FLG = false;
     communication_timer1 = millis();
   } 
+
   // if no byte received from CAN bus , run this code and return until the bus is active
   else if (millis()-communication_timer1 >= TIMEOUT_TIME){
     // Pull BMSOUT = LOW
     digitalWrite(BMSOUT,LOW);
     CAN_TIMEOUT_FLG = true;
+
     if( millis()-shutdown_timer1 >= 400 ){
         Serial.println("NO_BYTE_RECV");
         shutdown_timer1 = millis();
     }
     // Reset data structure back to default, to prevent reading garbage value
     for (int i = 0; i < BMU_NUM; i++) {
-      BMS_ROSPackage[i].~BMSdata(); // Explicitly call destructor (optional)
-      new (&BMS_ROSPackage[i]) BMSdata(); // Placement new to reinitialize
+      BMU_Package[i].~BMUdata(); // Explicitly call destructor (optional)
+      new (&BMU_Package[i]) BMUdata(); // Placement new to reinitialize
     }
-    SDCstat = SDCstatus();
-    // digitalWrite(BMSOUT,BMS_OK);
-    // Serial.println("NO_BYTE_RECV");
+    SDC_Signal_Board = SDCsignal();
     return;
   }
     
-  
   /* ====================================================Task 2 : Determine BMS_OK relay state ==================================================== */
     
     // Pulling data from BMS_ROSPackage to decide on BMS_OK state
     // Faulting Matrix , looping to check : (May need to improve to a more time efficient method)
 
+    // Warning condition
+    (ACCUM_VOLTAGE >= 0.9 * ACCUM_MAXVOLTAGE) ? (ACCUM_Full = 1) : (ACCUM_Full = 0) ;
+    (ACCUM_VOLTAGE <= 1.12 * ACCUM_MINVOLTAGE) ? ( LOW_VOLTAGE_LIGHT = 1) : (LOW_VOLTAGE_LIGHT = 0);
+
     // IF ANY of the Module is at Critical Raise a Fault flag, BMS_OK = 0;
     // Check Fault Condition of all Module 
 
+    
+    bool ACCUMULATOR_Fault;
+    ACCUMULATOR_Fault = AMS_Package.OVERVOLT_CRITICAL | AMS_Package.LOWVOLT_CRITICAL | AMS_Package.OVERTEMP_CRITICAL;
 
-    // ACCUM_OK =  BMS_ROSPackage[0].BMU_FAULTY | BMS_ROSPackage[1].BMU_FAULTY | BMS_ROSPackage[2].BMU_FAULTY |
-                // BMS_ROSPackage[3].BMU_FAULTY | BMS_ROSPackage[4].BMU_FAULTY | BMS_ROSPackage[5].BMU_FAULTY |
-                // BMS_ROSPackage[6].BMU_FAULTY | BMS_ROSPackage[7].BMU_FAULTY;
-    ACCUM_OK =  BMS_ROSPackage[0].BMU_FAULTY | BMS_ROSPackage[1].BMU_FAULTY;
+    // Maybe ACCUM_OK should just be OR between every ACCUM Fault
+    // BMU struct serve as both the way to send specific BMU data , and also a temp buffer for unpacked data 
+    // when we want to convolute all of them into Accum fault , each of their own
     
-    (ACCUM_OK > 0) ? (BMS_OK = 0) : (BMS_OK = 1);
+    (ACCUMULATOR_Fault > 0) ? (AMS_OK = 0) : (AMS_OK = 1);
     
+    if(millis()-reference_time >= 200){
+      // Serial.print("BMUROS1: "); Serial.println(BMS_ROSPackage[0].BMU_FAULTY);
+      // Serial.print("BMUROS2: "); Serial.println(BMS_ROSPackage[1].BMU_FAULTY);
+      // Serial.print("ACCUMOK ");Serial.println(ACCUM_OK);
+      // Serial.print("BMSOK "); Serial.println(BMS_OK);
+      reference_time = millis();
+    }
 
     /*------- Coordiante BMU cell Balancing with OBC ------------*/
     // Check if BMU must be ready to charge
-    // ACCUM_CHG_READY_OK =  BMS_ROSPackage[0].BMUreadytoCharge & BMS_ROSPackage[1].BMUreadytoCharge & BMS_ROSPackage[2].BMUreadytoCharge &
+    // ACCUM_ReadytoCharge =  BMS_ROSPackage[0].BMUreadytoCharge & BMS_ROSPackage[1].BMUreadytoCharge & BMS_ROSPackage[2].BMUreadytoCharge &
     //                       BMS_ROSPackage[4].BMUreadytoCharge & BMS_ROSPackage[5].BMUreadytoCharge & BMS_ROSPackage[6].BMUreadytoCharge & 
     //                       BMS_ROSPackage[7].BMUreadytoCharge;
 
-    // ACCUM_CHG_READY_OK =  BMS_ROSPackage[0].BMUreadytoCharge & BMS_ROSPackage[1].BMUreadytoCharge ;
 
+    // if BMU(s) respond with Charger ready OK = 1 , then we start the operation
+    (OBCFault > 0) ? (OBC_OK = 0): (OBC_OK = 1);
 
-    // // if BMU(s) respond with Charger ready OK = 1 , then we start the operation
-    // (OBCstatusbit > 0) ? (OBC_OK = 0): (OBC_OK = 1);
-
-    // if(CHARGER_PLUGGED)
-    //   ((ACCUM_OK & OBC_OK) > 0) ? (BMS_OK = 0) : (BMS_OK = 1);
+    if(CHARGER_PLUGGED)
+      ((ACCUMULATOR_Fault & OBC_OK) > 0) ? (AMS_OK = 0) : (AMS_OK = 1);
   
     // // Convert V_MODULE back to physical value
-    // ( ACCUMULATOR_VOLTAGE >= 0.9 * ACCUM_MAXVOLTAGE) ? (ACCUMULATOR_FULL = 1) : (ACCUMULATOR_FULL = 0) ;
-
-    // (ACCUMULATOR_VOLTAGE <= 1.12 * ACCUM_MINVOLTAGE) ? (ACCUMULATOR_LOW_VOLTAGE = 1) : (ACCUMULATOR_LOW_VOLTAGE = 0) ;
+    
 
     // // case 1 Full voltage
-    // (ACCUMULATOR_FULL) ? (BMS_OK = 0) : (BMS_OK = 1);
+    
     // /* Signal to */
     // // case 2 Low Voltage
-    // (ACCUMULATOR_LOW_VOLTAGE) ? (BMS_OK = 0) : (BMS_OK = 1);
+    
     /*Signal to LowVoltage light*/
 
     // Serial Debug for which cells should be displayed as warning or critical
@@ -399,55 +326,27 @@ void loop(){
 
   
   /* ====================================================Task 1 : Check Fault, Shutdown ==================================================== */ 
-    
-    // case 0 : communication timeout, via wiring or protocol error , lock MCU in this condition loop
-    // if( CAN_TIMEOUT_FLG ) {
-    //   // Reset the entired structure
-    //   // for(short i =0 ; i <BMU_NUM ; i++)
-    //   //   BMS_ROSPackage[i] = BMSdata(); 
-    //   // Timeout we set BMS_OK as 0
-    //   // BMS_OK = 0; // Reaffirm BMS_OK state to be 0 , as No Byte recieve
-    //   digitalWrite(BMSOUT,BMS_OK);
-    //   if( millis()-shutdown_timer1 >= 400){
-    //     Serial.println("NO_BYTE_RECV");
-    //     shutdown_timer1 = millis();
-    //   }
-    //   return;
-    // }
-    // // case 1: BMS detect fault , BMS_OK output LOW 
-    // else if ( !BMS_OK ) {
-    //   digitalWrite(BMSOUT,BMS_OK); 
-    // }
-    // // case 2 , BMS operate Normally , BMS output HIGH
-    // else if (BMS_OK) {
-    //   digitalWrite(BMSOUT,BMS_OK);
-    //   // Reset affirm status as Normal Operation
-    //   // BMS_OK = 1;
-    // }
-
-    
-
-    // case 1: BMS detect fault , BMS_OK output LOW 
-    if ( !BMS_OK ) {
-      digitalWrite(BMSOUT,LOW); 
-    }
-    // case 2 , BMS operate Normally , BMS output HIGH
-    else if (BMS_OK) {
+   
+    if(!AMS_OK){
+      digitalWrite(BMSOUT,LOW);
+    } else{
       digitalWrite(BMSOUT,HIGH);
-      // Reset affirm status as Normal Operation
-      // BMS_OK = 1;
-    }  
-    if(millis()-reference_time >= 400){
-      Serial.println(ACCUM_OK);
-      Serial.print("BMSOK");Serial.println(BMS_OK);
-      reference_time = millis();
     }
+
+    // Low Voltage light 
+    if(LOW_VOLTAGE_LIGHT)
+      
+    // overtemp warning light
+    if(AMS_Package.OVERTEMP_WARNING)
+  
+    
     
     // Whilst happend AIR+ can be any affect by any fault relay , BSPD , IMD.
 
     // when fault code detected, yes this works , but when receiving with cell data msg, why sometimes the light blink?
     // Problem , once the shutdown state is reached,  and back to normal operation , the state of Relay won't reset
   
+
   /*-------------- BMSROS_Package debug with SD card logger -------------*/
   // Packing data to SD
   // packing data to Remote System using CORE0
@@ -458,7 +357,14 @@ void loop(){
   // After publishing to ROS , reset all BMU data with for loop
 
   // reset state with default constructor at the end of all task 
-  
+  // unsigned long loopcount = 
+  // Serial.println(1++);
+
+  // Read SDC output signal to AIR+
+    (digitalRead(SDCIN)) ? (AIRplus = 1) : (AIRplus = 0);
+    // Read IMD_Ok and BSPD_OK status from SDC
+    (digitalRead(IMDIN)) ? (IMD_Relay = 1) : (IMD_Relay = 0);
+    (digitalRead(BSPDIN)) ? (BSPD_Relay = 1) : (BSPD_Relay = 0);
 } 
 
 /*******************************************************************
@@ -482,7 +388,7 @@ void packBMUmsg ( twai_message_t *BCUsent, uint16_t Sync_time,  bool &is_charger
   BCUsent->data[7] = 0x00;
     
 }
-void unpackBMUmsg ( twai_message_t* BCUreceived , BMSdata *BMS_ROSPackage) {
+void unpackBMUmsg ( twai_message_t* BCUreceived , BMUdata *BMU_Package) {
   
   CANIDDecoded decodedCANID;
   decodeExtendedCANID(&decodedCANID, (BCUreceived->identifier));
@@ -513,28 +419,29 @@ void unpackBMUmsg ( twai_message_t* BCUreceived , BMSdata *BMS_ROSPackage) {
       // MSG1 == Operation status
       case 1:
         // Charging Ready
-        BMS_ROSPackage[i].BMUreadytoCharge = BCUreceived->data[0];
+        BMU_Package[i].BMUreadytoCharge = BCUreceived->data[0];
         // Balancing Discharge cell number
-        BMS_ROSPackage[i].BalancingDischarge_Cells = mergeHLbyte(BCUreceived->data[1],BCUreceived->data[2]);
+        BMU_Package[i].BalancingDischarge_Cells = mergeHLbyte(BCUreceived->data[1],BCUreceived->data[2]);
         // Vbatt (Module) , dVmax(cell)
-        BMS_ROSPackage[i].V_MODULE = BCUreceived->data[3]; 
-        ACCUMULATOR_VOLTAGE += BCUreceived->data[3] * 0.2; // add to ACCUM
-        BMS_ROSPackage[i].DV = BCUreceived->data[4]; 
+        BMU_Package[i].V_MODULE = BCUreceived->data[3]; 
+        BMU_Package[i].DV = BCUreceived->data[4]; 
         // Temperature sensor
-        BMS_ROSPackage[i].TEMP_SENSE[0] = BCUreceived->data[5];
-        BMS_ROSPackage[i].TEMP_SENSE[1] = BCUreceived->data[6];
+        BMU_Package[i].TEMP_SENSE[0] = BCUreceived->data[5];
+        BMU_Package[i].TEMP_SENSE[1] = BCUreceived->data[6];
+
+        AMS_Package.ACCUMULATOR_VOLTAGE += BMU_Package[i].V_MODULE * 0.2; // add to ACCUM
         break;
 
       case 2:
         // Low series Side Cell C1-C8
         for(short j=0; j< 8; j++)
-          BMS_ROSPackage[i].V_CELL[j] = BCUreceived->data[i];
+          BMU_Package[i].V_CELL[j] = BCUreceived->data[i];
         break;
 
       case 3:
         // High series side Cell C8-CellNumber
         for( short j = 8; j <= 15; j++ )
-          BMS_ROSPackage[i].V_CELL[j] = BCUreceived->data[i-8];
+          BMU_Package[i].V_CELL[j] = BCUreceived->data[i-8];
         break;
     }
   }
@@ -548,27 +455,37 @@ void unpackBMUmsg ( twai_message_t* BCUreceived , BMSdata *BMS_ROSPackage) {
     {
       case 1:
         // Merge H and L byte of each FaultCode back to 10 bit binary
-        BMS_ROSPackage[i].OVERVOLTAGE_WARNING =  mergeHLbyte( BCUreceived->data[0], BCUreceived->data[1] );  
-        BMS_ROSPackage[i].OVERVOLTAGE_CRITICAL = mergeHLbyte( BCUreceived->data[2], BCUreceived->data[3] );  
-        BMS_ROSPackage[i].LOWVOLTAGE_WARNING = mergeHLbyte( BCUreceived->data[4], BCUreceived->data[5] );
-        BMS_ROSPackage[i].LOWVOLTAGE_CRITICAL = mergeHLbyte( BCUreceived->data[6], BCUreceived->data[7] ); 
+        BMU_Package[i].OVERVOLTAGE_WARNING =  mergeHLbyte( BCUreceived->data[0], BCUreceived->data[1] );  
+        BMU_Package[i].OVERVOLTAGE_CRITICAL = mergeHLbyte( BCUreceived->data[2], BCUreceived->data[3] );  
+        BMU_Package[i].LOWVOLTAGE_WARNING = mergeHLbyte( BCUreceived->data[4], BCUreceived->data[5] );
+        BMU_Package[i].LOWVOLTAGE_CRITICAL = mergeHLbyte( BCUreceived->data[6], BCUreceived->data[7] ); 
         break;
       case 2:
         // Merge H and L byte of each FaultCode back to 10 bit binary
-        BMS_ROSPackage[i].OVERTEMP_WARNING = mergeHLbyte( BCUreceived->data[0], BCUreceived->data[1] );  
-        BMS_ROSPackage[i].OVERTEMP_CRITICAL = mergeHLbyte( BCUreceived->data[2], BCUreceived->data[3] ); 
-        BMS_ROSPackage[i].OVERDIV_VOLTAGE_WARNING = mergeHLbyte( BCUreceived->data[4], BCUreceived->data[5] ); 
-        BMS_ROSPackage[i].OVERDIV_VOLTAGE_CRITICAL = mergeHLbyte( BCUreceived->data[6], BCUreceived->data[7] );
-        // Immediately check the first Module that contains cells with dV over critical
-        immediateCheck_ACCUM_OVERDIV_OK(mergeHLbyte( BCUreceived->data[6], BCUreceived->data[7] ) ); // Figure out when should OBC hold off its operation whilist balancing
+        BMU_Package[i].OVERTEMP_WARNING = mergeHLbyte( BCUreceived->data[0], BCUreceived->data[1] );  
+        BMU_Package[i].OVERTEMP_CRITICAL = mergeHLbyte( BCUreceived->data[2], BCUreceived->data[3] ); 
+        BMU_Package[i].OVERDIV_VOLTAGE_WARNING = mergeHLbyte( BCUreceived->data[4], BCUreceived->data[5] ); 
+        BMU_Package[i].OVERDIV_VOLTAGE_CRITICAL = mergeHLbyte( BCUreceived->data[6], BCUreceived->data[7] );
         break;
     }
-    // Immediately check this Module if Faultcode pass filter condition
-    immediateCheck_BMU_FAULTY(i,BMS_ROSPackage); 
+    // when AMS_package gets OR until more than 0 , the code will trigger shutdown automatically, so the code to check
+    // can be run along side receiving each message , no need to buffer until BMU num
+    AMS_Package.OVERVOLT_WARNING |= BMU_Package[i].OVERVOLTAGE_WARNING;
+    AMS_Package.LOW_VOLTAGE_WARNING |= BMU_Package[i].LOWVOLTAGE_WARNING;
+    AMS_Package.OVERTEMP_WARNING |= BMU_Package[i].OVERTEMP_WARNING;
+    AMS_Package.OVERDIV_CRITICAL |= BMU_Package[i].OVERDIV_VOLTAGE_WARNING;
+
+    AMS_Package.OVERVOLT_CRITICAL |= BMU_Package[i].OVERVOLTAGE_CRITICAL;
+    AMS_Package.LOWVOLT_CRITICAL |= BMU_Package[i].LOWVOLTAGE_CRITICAL;
+    AMS_Package.OVERTEMP_CRITICAL |= BMU_Package[i].OVERTEMP_CRITICAL;
+    AMS_Package.OVERDIV_CRITICAL |= BMU_Package[i].OVERDIV_VOLTAGE_CRITICAL;
+      // Serial.println(BMS_ROSPackage[i].OVERVOLTAGE_CRITICAL,HEX);
+      // Serial.println(BMS_ROSPackage[i].LOWVOLTAGE_CRITICAL,HEX);
+      // Serial.println(BMS_ROSPackage[i].OVERTEMP_CRITICAL, HEX);
     
   }
 }
-void packOBCmsg ( twai_message_t *BCUsent, bool &BMS_OK , bool &ReadytoCharge, bool &OverDivCritical_Yes, bool &Voltage_is_Full) {
+void packOBCmsg ( twai_message_t *BCUsent, bool &AMS_OK , bool &ReadytoCharge, bool &OverDivCritical_Yes, bool &Voltage_is_Full) {
 
   /* Set up BMS CAN frame*/
   BCUsent->identifier  = OBC_ADD; // refers to specification sheet
@@ -578,7 +495,7 @@ void packOBCmsg ( twai_message_t *BCUsent, bool &BMS_OK , bool &ReadytoCharge, b
   BCUsent->data[6] = 0x00;
   BCUsent->data[7] = 0x00;
   // Condition 1 iF BMS_OK AND ACCUM is Ready Any Module not Critically OVERDIV, ACCUMULATOR VOLTAGE ISN"T FULL YET
-  if((BMS_OK && ReadytoCharge) || !OverDivCritical_Yes || !Voltage_is_Full) {
+  if((AMS_OK && ReadytoCharge) || !OverDivCritical_Yes || !Voltage_is_Full) {
     BCUsent->data[0] = 0x0C; // V highbyte 
     BCUsent->data[1] = 0x80; // V lowbyte 72.0 V fake data -> Range 69-72-74 V
     BCUsent->data[2] = 0x00; // A Highbyte
@@ -592,7 +509,6 @@ void packOBCmsg ( twai_message_t *BCUsent, bool &BMS_OK , bool &ReadytoCharge, b
     BCUsent->data[3] = 0x00;
     BCUsent->data[4] = 0x01; // Control Byte 1 charger shutdown
   } 
-
 }
 void unpackOBCmsg ( twai_message_t *BCUreceived ) {
   // if message ID isnt 0x18FF50E5 , return
@@ -604,9 +520,9 @@ void unpackOBCmsg ( twai_message_t *BCUreceived ) {
     uint8_t VoutL = BCUreceived->data[1];
     uint8_t AoutH = BCUreceived->data[2];
     uint8_t AoutL = BCUreceived->data[3];
-    OBCstatusbit =  BCUreceived->data[4]; // Status Byte
-    OBCVolt = mergeHLbyte(VoutH,VoutL);
-    OBCAmp = mergeHLbyte(AoutH,AoutL);
+    OBC_Package.OBCstatusbit =  BCUreceived->data[4]; // Status Byte
+    OBC_Package.OBCVolt = mergeHLbyte(VoutH,VoutL);
+    OBC_Package.OBCAmp = mergeHLbyte(AoutH,AoutL);
 
 }
 void checkModuleTimeout(){
@@ -632,75 +548,60 @@ void checkModuleTimeout(){
   return;
 
 }
-void checkACCUMULATORvoltage (){
-  // Perform Immediate Check on main Loop
-  // Convert V_MODULE back to physical value
-  if( ACCUMULATOR_VOLTAGE >= 0.9 * ACCUM_MAXVOLTAGE)
-    ACCUMULATOR_FULL = 1;
-  else
-    ACCUMULATOR_FULL = 0;
-
-  if(ACCUMULATOR_VOLTAGE <= 1.12 * ACCUM_MINVOLTAGE)   
-    ACCUMULATOR_LOW_VOLTAGE = 1;
-  else
-    ACCUMULATOR_LOW_VOLTAGE = 0;
-}
 /* ==================================Serial Debugger==============================*/
 // Use Non-Block string , there's literally no perfect way to Serial Debug asynchronusly
 // maybe use this on Core 0
 void debugBMUmsg(int Module){
 
-    Serial.print("BMU Operation Status: "); Serial.println(BMS_ROSPackage[Module].BMUreadytoCharge);
-    Serial.print("Cell balancing discharge: "); Serial.println(BMS_ROSPackage[Module].BalancingDischarge_Cells);
+    Serial.print("BMU Operation Status: "); Serial.println(BMU_Package[Module].BMUreadytoCharge);
+    Serial.print("Cell balancing discharge: "); Serial.println(BMU_Package[Module].BalancingDischarge_Cells);
     Serial.print("V_CELL C1-10: ");
     // can change to vector , for easy looping funcion
     for(short i=0; i< CELL_NUM; i++){
-      Serial.print(BMS_ROSPackage[Module].V_CELL[i]); Serial.print("V.  ");
+      Serial.print(BMU_Package[Module].V_CELL[i]); Serial.print("V.  ");
     } Serial.println();
-    Serial.print("V_MODULE: "); Serial.print(BMS_ROSPackage[Module].V_MODULE); Serial.println("V.  ");
-    Serial.print("AVG_CELL_VOLTAGE_DIFF: ") ; Serial.print(BMS_ROSPackage[Module].DV); Serial.println("V.  ");
+    Serial.print("V_MODULE: "); Serial.print(BMU_Package[Module].V_MODULE); Serial.println("V.  ");
+    Serial.print("AVG_CELL_VOLTAGE_DIFF: ") ; Serial.print(BMU_Package[Module].DV); Serial.println("V.  ");
 
     Serial.print("TEMP_SENSOR T1-T2: ");
     for(short i=0; i< TEMP_SENSOR_NUM; i++){
-      Serial.print(BMS_ROSPackage[Module].TEMP_SENSE[i]); Serial.print("C.  ");
+      Serial.print(BMU_Package[Module].TEMP_SENSE[i]); Serial.print("C.  ");
     } Serial.println();
 
     Serial.println();
 
 }
 void debugBMUFault(int Module){
-  if(!SDCstat.BMS_OK){
+  
     Serial.print("OVERVOLTAGE_CRITICAL_CELLS (C1-C10): ");
-    Serial.println(BMS_ROSPackage[Module].OVERVOLTAGE_CRITICAL,HEX);
+    Serial.println(BMU_Package[Module].OVERVOLTAGE_CRITICAL,HEX);
     Serial.print("UNDERVOLTAGE_CRITICAL_CELLS (C1-C10): ");
-    Serial.println(BMS_ROSPackage[Module].LOWVOLTAGE_CRITICAL,HEX);
+    Serial.println(BMU_Package[Module].LOWVOLTAGE_CRITICAL,HEX);
     Serial.print("OVERTEMP_CRITICAL (C1-C10): ");
-    Serial.println(BMS_ROSPackage[Module].OVERTEMP_CRITICAL, HEX);
+    Serial.println(BMU_Package[Module].OVERTEMP_CRITICAL, HEX);
     Serial.print("OVERDIV_CRITICAL (C1-C10): ");
-    Serial.println(BMS_ROSPackage[Module].OVERDIV_VOLTAGE_CRITICAL,HEX);
+    Serial.println(BMU_Package[Module].OVERDIV_VOLTAGE_CRITICAL,HEX);
     Serial.println();
-  } else {
-    
-  }
+  
     Serial.print("OVERVOLTAGE_WARNING_CELLS (C1-C10): ");
-    Serial.println(BMS_ROSPackage[Module].OVERVOLTAGE_WARNING,HEX);
+    Serial.println(BMU_Package[Module].OVERVOLTAGE_WARNING,HEX);
     Serial.print("UNDERVOLTAGE_WARNING_CELLS (C1-C10): ");
-    Serial.println(BMS_ROSPackage[Module].LOWVOLTAGE_WARNING,HEX);
+    Serial.println(BMU_Package[Module].LOWVOLTAGE_WARNING,HEX);
     Serial.print("OVERTEMP_WARNING (C1-C10): ");
-    Serial.println(BMS_ROSPackage[Module].OVERTEMP_WARNING, HEX);
+    Serial.println(BMU_Package[Module].OVERTEMP_WARNING, HEX);
     Serial.print("OVERDIV_WARNING (C1-C10): ");
-    Serial.println(BMS_ROSPackage[Module].OVERDIV_VOLTAGE_WARNING,HEX);
+    Serial.println(BMU_Package[Module].OVERDIV_VOLTAGE_WARNING,HEX);
     Serial.println();  
     
 }
 void debugOBCmsg(){
     
-    Serial.print("Voltage from OBC: "); Serial.print(OBCVolt); Serial.println("V");
-    Serial.print("Current from OBC: "); Serial.print(OBCAmp); Serial.println("A");
-    Serial.print("OBC status bit"); Serial.println(OBCstatusbit);
+    Serial.print("Voltage from OBC: "); Serial.print(OBC_Package.OBCVolt); Serial.println("V");
+    Serial.print("Current from OBC: "); Serial.print(OBC_Package.OBCAmp); Serial.println("A");
+    Serial.print("OBC status bit"); Serial.println(OBC_Package.OBCstatusbit);
 
     // Intepret Individual bit meaning
-    bool *obcstatbitarray =  toBitarrayLSB(OBCstatusbit); // Status Byte
+    bool *obcstatbitarray =  toBitarrayLSB(OBC_Package.OBCstatusbit); // Status Byte
     
     Serial.print("OBC status bit: ");
     switch (obcstatbitarray[0]) {
@@ -736,28 +637,20 @@ void debugSDC(){
     Serial.println();
 
   // Signal = 0 means at fault
-  if(!SDCstat.SHUTDOWN_OK_SIGNAL)
+  if(!SDC_Signal_Board.AIRplus)
     Serial.println("SDC_OK_SiGNAL: OFF");
-  if(!SDCstat.BMS_OK)
-    Serial.println("BMS_OK = 0");
-  if(!SDCstat.IMD_OK)
+  if(!SDC_Signal_Board.IMD_Relay)
     Serial.println("IMD_OK = 0");
-  if(!SDCstat.BSPD_OK)
+  if(!SDC_Signal_Board.BSPD_Relay)
     Serial.println("BSPD_OK = 0");
-
   
 }
 
 // ---------------------------------------------------------------Sub-function
 // Perform immediate Check during the execution of unpack();
-void immediateCheck_BMU_FAULTY(int Module , BMSdata *BMS_ROSPackage) {
-  // Compile the warning flag , to signal GUI that specific module at CRITICAL
-  BMS_ROSPackage[Module].BMU_FAULTY = BMS_ROSPackage[Module].OVERVOLTAGE_CRITICAL | BMS_ROSPackage[Module].LOWVOLTAGE_CRITICAL 
-                                | BMS_ROSPackage[Module]. OVERTEMP_CRITICAL;
-  // Compile the warning flag , to signal GUI that specific module at WARNING
-  BMS_ROSPackage[Module].BMU_WARNING = BMS_ROSPackage[Module].OVERVOLTAGE_WARNING | BMS_ROSPackage[Module].LOWVOLTAGE_WARNING 
-                                | BMS_ROSPackage[Module]. OVERTEMP_WARNING;
-}
+
+  
+
 void immediateCheck_ACCUM_OVERDIV_OK(uint16_t OVERDIV_CRITICALstatusbit) {
   // Perform Immediate Check on BMU frame
   // to reduce to just one loop , because it is inevitable , unless I use the bit shift command for each i , hmmm interesting 
@@ -776,10 +669,10 @@ void immediateCheck_ACCUM_OVERDIV_OK(uint16_t OVERDIV_CRITICALstatusbit) {
       // First cell to be found as overdiv critical will shutdown charger (Not Shutdown the BMS_OK)
       for (int i = CELL_NUM - 1; i >= 0; i--) {
         if( (bitHolder & 1) == 1 ) {
-          ACCUM_OVERDIV_OK = 1;
+          AMS_Package.OVERDIV_CRITICAL = 1;
           break; 
         } else {
-          ACCUM_OVERDIV_OK = 0;
+          AMS_Package.OVERDIV_CRITICAL = 0;
         }
         bitHolder >>= 1; // Right Shift num by 1 pos. before next loop , we AND with 1 again
       }

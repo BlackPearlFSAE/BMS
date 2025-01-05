@@ -10,5 +10,6 @@
     "valarray": "cpp",
     "vector": "cpp",
     "utility": "cpp"
-  }
+  },
+  "cmake.sourceDirectory": "C:/Users/Jacki/Documents/PlatformIO/Projects/BMS code/lib/Adafruit_BusIO"
 }

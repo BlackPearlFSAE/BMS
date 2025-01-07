@@ -7,7 +7,7 @@
 #include <cstring>
 
 // Default configuration of AMS
-#define CELL_NUM 16
+#define CELL_NUM 10
 #define BMU_NUM 8
 /*Amita Battery*/
 #define VMAX_CELL 4.2
@@ -15,14 +15,13 @@
 /*Thermistor*/
 #define TEMP_MAX_CELL 60
 #define TEMP_SENSOR_NUM 2
-
 #define DVMAX 0.2
 
 
 struct BMUdata {
   // Basic BMU Data
-  uint8_t V_CELL[CELL_NUM];
-  uint8_t TEMP_SENSE[TEMP_SENSOR_NUM];
+  uint8_t V_CELL[CELL_NUM] = {0};
+  uint8_t TEMP_SENSE[TEMP_SENSOR_NUM] = {0};
   uint8_t V_MODULE = 0;
   uint8_t DV = 0;
   // FaultCode 10 bit binary representation of C
@@ -34,32 +33,25 @@ struct BMUdata {
   uint16_t OVERTEMP_CRITICAL = 0;
   uint16_t OVERDIV_VOLTAGE_WARNING = 0 ; // Trigger cell balancing of the cell at fault
   uint16_t OVERDIV_VOLTAGE_CRITICAL = 0; // Trigger Charger disable in addition to Cell balancing
-  
-
   // Status
   uint16_t BalancingDischarge_Cells = 0;
-  bool BMUconnected = 1;   // Default as Active true , means each BMU is on the bus
+  bool BMUconnected = 0;   // Default as Active true , means each BMU is on the bus
   bool BMUreadytoCharge = 0;
-  
-  // Reset call
-  BMUdata() {
-        memset(V_CELL, 0, sizeof(V_CELL));
-        memset(TEMP_SENSE, 0, sizeof(TEMP_SENSE));
-        } 
 }; 
 
 // ACCUMULATOR Data , Local to BCU (Make this a struct later , or not? , I don't want over access)
 struct AMSdata {
 
-  float ACCUMULATOR_VOLTAGE = 0.0; 
-  float ACCUMULATOR_MAXVOLTAGE = VMAX_CELL * CELL_NUM; // Expected
-  float ACCUMULATOR_MINVOLTAGE = VMIN_CELL * CELL_NUM; // Expected
-  bool ACCUMULATOR_CHG_READY = 0;
-
+  float ACCUM_VOLTAGE = 0.0; 
+  float ACCUM_MAXVOLTAGE = (VMAX_CELL * CELL_NUM * BMU_NUM); // Expected
+  // float ACCUMULATOR_MINVOLTAGE = VMIN_CELL * CELL_NUM * BMU_NUM; // Expected
+  float ACCUM_MINVOLTAGE = 40.0; // Expected
+  bool ACCUM_CHG_READY = 0;
 
   bool OVERVOLT_WARNING = 0;
-  bool LOW_VOLTAGE_WARNING = 0;
+  bool LOWVOLT_WARNING = 0;
   bool OVERTEMP_WARNING = 0;
+  bool OVERDIV_WARNING = 0;
 
   bool OVERVOLT_CRITICAL = 0;
   bool LOWVOLT_CRITICAL =  0;

@@ -18,6 +18,7 @@ float Decode_bytearray(unsigned char* c);
 bool *toBitarrayMSB(uint16_t num);
 bool *toBitarrayLSB(uint16_t num);
 
+
 uint16_t toUint16FromBitarrayMSB(const bool *bitarr);
 uint16_t toUint16FromBitarrayLSB(const bool *bitarr);
 
@@ -54,4 +55,11 @@ uint32_t createExtendedCANID(uint8_t PRIORITY, uint8_t BASE_ID, uint8_t MSG_NUM 
 void decodeExtendedCANID(struct CANIDDecoded* CANIDDecoded ,uint32_t canID);
 
 
+
+
+uint16_t toUint16FromBitarrayMSB(const bool *bitarr);
+uint16_t toUint16FromBitarrayLSB(const bool *bitarr);
+
+
+// --Shutdown mechanism & BMS specific Util
 

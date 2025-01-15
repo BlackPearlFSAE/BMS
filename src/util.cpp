@@ -51,23 +51,23 @@ unsigned char* checkstatMSB(unsigned char num){
   return arr;
 }
 
-void checkstatLSB(SDCstatus* STAT, unsigned char num){
-  // static uint8_t arr[8]; // array to hold 8 binary number
-  // STAT->shutdownsig = 1;
-  for (int i = 0; i < 8; i++){
-    uint8_t bit = num & 1;
-    STAT->statbin[i] = bit;
-    if(bit == 1){
-        STAT->shutdownsig = 0;
-    }
-    num >>= 1; // Right Shift num by 1 pos. before next loop , we AND with 1 again
+// void checkstatLSB(SDCstatus* STAT, unsigned char num){
+//   // static uint8_t arr[8]; // array to hold 8 binary number
+//   // STAT->shutdownsig = 1;
+//   for (int i = 0; i < 8; i++){
+//     uint8_t bit = num & 1;
+//     STAT->statbin[i] = bit;
+//     if(bit == 1){
+//         STAT->shutdownsig = 0;
+//     }
+//     num >>= 1; // Right Shift num by 1 pos. before next loop , we AND with 1 again
 
-    // 1st shift will shift to right by 7 position
-        // 1 => 0b00000001 , then AND with 1 so anything that isn't one at 1st pos will be cut off
-        // Ex. 42 = 0b00101010
-        // 00101010 >> 0 = 00101010 & 00000001 = 0 (point at 1st bit 1 encounter from left . shift to right by 0 pos)
-        // 00101010 >> 1 = 00010101 & 00000001 = 1
-        // 00101010 >> 2 = 00001010 & 00000001 = 0
-    // Check for bit 1 for immediate shutdown
-  } 
-}
+//     // 1st shift will shift to right by 7 position
+//         // 1 => 0b00000001 , then AND with 1 so anything that isn't one at 1st pos will be cut off
+//         // Ex. 42 = 0b00101010
+//         // 00101010 >> 0 = 00101010 & 00000001 = 0 (point at 1st bit 1 encounter from left . shift to right by 0 pos)
+//         // 00101010 >> 1 = 00010101 & 00000001 = 1
+//         // 00101010 >> 2 = 00001010 & 00000001 = 0
+//     // Check for bit 1 for immediate shutdown
+//   } 
+// }

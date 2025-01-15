@@ -81,9 +81,15 @@ void loop(){
     digitalWrite(SDCPIN,LOW); Serial.println("!SHUTDOWN!");
   }
 
-  /*---------------------------------------------Charging Event Routine*/
+  //Determine Event BCU is operating on
+  // 1. Charging Event
+
+  // 2. Driving Event
+
+  
+
+  /*---------------------------------------------Charging Event Routine (Cell Balancing)*/
   // Condition to Check if the Charger is plugged 
-  if(chargercond){
 
     // BCU OBC Communication (500ms cycle time)
     if(millis()-last_time >= 500) {
@@ -96,11 +102,11 @@ void loop(){
       CANreceive();
       BCUreadOBC(&receivemsg);
 
-      last_time = millis();
-    }
+    last_time = millis();
   }
+  
 
-  /*---------------------------------------------Driving Event Routine*/
+  /*---------------------------------------------Driving Event Routine (Monitoting)*/
 
   // BCU CMD <-> BMU Module Report
   if(millis()-last_time >= 100){
@@ -244,9 +250,9 @@ void BCUreadOBC(_can_frame* BCUreceived){
 }
 
 
-void bcuSendbmu() {
+void BCUtoBMUwrite(_can_frame* BCUsent) {
 
 }
-void bcuReadSDC(){
+void BCUReadSDC(_can_frame* SDCreceived){
 
 }
